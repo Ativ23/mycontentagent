@@ -1,0 +1,471 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { execFileSync } from 'child_process'
+import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
+import { join } from 'path'
+import sharp from 'sharp'
+import { getSupabaseAdmin } from '@/lib/supabase'
+import { anthropic } from '@/lib/anthropic'
+import { getVideoProvider } from '@/lib/video-providers'
+
+export const runtime = 'nodejs'
+export const maxDuration = 300 // 5-min timeout for AI generation
+
+const TMP = '/tmp/mycontentagent'
+const VID_W = 1080
+const VID_H = 1920
+
+// ─── Caption rendering ────────────────────────────────────────────────────────
+
+function xmlEscape(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+function buildCaptionSVG(words: string[], highlights: Set<string>): string {
+  const boxH = 230
+  const boxY = VID_H - boxH - 130
+  const ty = boxY + 162
+  const totalChars = words.join(' ').length
+  const fontSize = Math.max(60, Math.min(92, Math.floor(900 / Math.max(totalChars, 8))))
+  const charW = fontSize * 0.62
+  const spaceW = fontSize * 0.34
+  const wordWidths = words.map((w) => w.length * charW)
+  const totalW = wordWidths.reduce((s, w) => s + w, 0) + spaceW * (words.length - 1)
+  let x = Math.max(40, (VID_W - totalW) / 2)
+
+  const strokes: string[] = []
+  const fills: string[] = []
+  words.forEach((word, i) => {
+    const clean = word.replace(/[.,!?'"]/g, '').toLowerCase()
+    const color = highlights.has(clean) ? '#FF3333' : 'white'
+    const wx = x + wordWidths[i] / 2
+    strokes.push(
+      `<text x="${wx.toFixed(1)}" y="${ty}" text-anchor="middle"` +
+      ` font-family="Arial Black, Impact, sans-serif" font-size="${fontSize}" font-weight="900"` +
+      ` fill="none" stroke="#000" stroke-width="10" stroke-linejoin="round">${xmlEscape(word)}</text>`
+    )
+    fills.push(
+      `<text x="${wx.toFixed(1)}" y="${ty}" text-anchor="middle"` +
+      ` font-family="Arial Black, Impact, sans-serif" font-size="${fontSize}" font-weight="900"` +
+      ` fill="${color}">${xmlEscape(word)}</text>`
+    )
+    x += wordWidths[i] + spaceW
+  })
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${VID_W}" height="${VID_H}">
+  <rect x="30" y="${boxY}" width="${VID_W - 60}" height="${boxH}" rx="22" fill="#000000" opacity="0.65"/>
+  ${strokes.join('\n  ')}
+  ${fills.join('\n  ')}
+</svg>`
+}
+
+// ─── Background helpers ───────────────────────────────────────────────────────
+
+async function buildGradientBg(path: string) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${VID_W}" height="${VID_H}">
+  <defs><radialGradient id="g" cx="50%" cy="38%" r="75%">
+    <stop offset="0%"   stop-color="#1e0e40"/>
+    <stop offset="60%"  stop-color="#0d0820"/>
+    <stop offset="100%" stop-color="#070709"/>
+  </radialGradient></defs>
+  <rect width="${VID_W}" height="${VID_H}" fill="url(#g)"/>
+</svg>`
+  await sharp(Buffer.from(svg)).png().toFile(path)
+}
+
+async function fetchPexelsPhoto(query: string, apiKey: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=5`,
+      { headers: { Authorization: apiKey } }
+    )
+    if (!res.ok) return null
+    const data = await res.json()
+    const photos: { src: { large2x?: string; large?: string; original?: string } }[] = data.photos || []
+    if (!photos.length) return null
+    const photo = photos[Math.floor(Math.random() * Math.min(photos.length, 3))]
+    return photo.src?.large2x ?? photo.src?.large ?? photo.src?.original ?? null
+  } catch { return null }
+}
+
+async function fetchPexelsVideo(query: string, apiKey: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=5`,
+      { headers: { Authorization: apiKey } }
+    )
+    if (!res.ok) return null
+    const data = await res.json()
+    const videos = data.videos || []
+    if (!videos.length) return null
+    const video = videos[Math.floor(Math.random() * Math.min(videos.length, 3))]
+    const files: { quality: string; height: number; link: string }[] = video.video_files || []
+    const file = files.find((f) => f.quality === 'hd' && f.height >= 720) || files.find((f) => f.height >= 480) || files[0]
+    return file?.link ?? null
+  } catch { return null }
+}
+
+async function downloadFile(url: string, dest: string): Promise<boolean> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return false
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (buf.length < 1024) return false // reject suspiciously small files
+    writeFileSync(dest, buf)
+    return true
+  } catch { return false }
+}
+
+// ─── Caption timing ──────────────────────────────────────────────────────────
+
+interface WordTiming { word: string; start: number; end: number }
+interface CaptionChunk { words: string[]; start: number; duration: number }
+
+function buildTimedChunks(wordTimings: WordTiming[], wordsPerChunk = 3): CaptionChunk[] {
+  const chunks: CaptionChunk[] = []
+  for (let i = 0; i < wordTimings.length; i += wordsPerChunk) {
+    const slice = wordTimings.slice(i, i + wordsPerChunk)
+    const next = wordTimings[i + wordsPerChunk]
+    const start = slice[0].start
+    const end = next?.start ?? slice[slice.length - 1].end
+    chunks.push({ words: slice.map((w) => w.word), start, duration: Math.max(0.1, end - start) })
+  }
+  return chunks
+}
+
+// ─── Scene helpers ────────────────────────────────────────────────────────────
+
+interface Scene { prompt: string; imageQuery: string }
+
+async function getScenes(script: string, numScenes: number): Promise<Scene[]> {
+  const res = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 600,
+    messages: [{
+      role: 'user',
+      content: `Split this TikTok script into exactly ${numScenes} visually distinct scenes for AI video generation. Each scene is only 5 seconds — make them visually interesting and varied from one another.
+
+For each scene return:
+- "prompt": a cinematic Runway AI prompt (~15 words, portrait/vertical format, no text/logos). Include: subject + action + environment + lighting. Vary the setting across scenes — different locations, lighting, perspectives.
+- "imageQuery": a 2-3 word Pexels photo search query for the starting frame (match the scene topic)
+
+Good prompt variety example for a finance video:
+Scene 1: "Person at laptop in modern office, dramatic side lighting, close-up on screen, slow push in"
+Scene 2: "Stack of cash on table, overhead shot, warm cinematic lighting, slight tilt"
+Scene 3: "City skyline at dusk, aerial view, golden hour, slow pan right"
+Scene 4: "Person checking phone banking app, shallow depth of field, soft indoor light"
+
+Each scene must look completely different from the previous one. Vary: indoor/outdoor, close-up/wide, people/objects/places.
+
+Return ONLY a JSON array of ${numScenes} objects {prompt, imageQuery}. No other text.
+
+Script:
+${script}`,
+    }],
+  })
+  const raw = res.content[0].type === 'text' ? res.content[0].text : '[]'
+  try {
+    const parsed = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]') as Scene[]
+    if (parsed.length === numScenes) return parsed
+  } catch { /* fall through */ }
+  // Fallback scenes if parsing fails
+  return Array.from({ length: numScenes }, (_, i) => ({
+    prompt: `Person talking to camera with confident expression, cinematic lighting, vertical portrait format, smooth camera movement scene ${i + 1}`,
+    imageQuery: 'person talking portrait',
+  }))
+}
+
+// ─── Compose multi-clip background ───────────────────────────────────────────
+
+function composeBackground(
+  clipPaths: string[],
+  segDur: number,
+  outputPath: string
+) {
+  // Each clip: loop if shorter than segDur, trim if longer, normalise to 30 fps + 1080x1920
+  const inputs = clipPaths.flatMap((p) => ['-stream_loop', '-1', '-t', segDur.toFixed(3), '-i', p])
+  const filters = clipPaths.map((_, i) =>
+    `[${i}:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setpts=PTS-STARTPTS[v${i}]`
+  )
+  const concatPart = clipPaths.map((_, i) => `[v${i}]`).join('') +
+    `concat=n=${clipPaths.length}:v=1:a=0[bgout]`
+
+  execFileSync('ffmpeg', [
+    '-y',
+    ...inputs,
+    '-filter_complex', [...filters, concatPart].join(';'),
+    '-map', '[bgout]',
+    '-r', '30',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+    outputPath,
+  ], { timeout: 120_000 })
+}
+
+// ─── Route ────────────────────────────────────────────────────────────────────
+
+export async function POST(req: NextRequest) {
+  const { packageId, script, audioUrl, bgVideoUrl } = await req.json()
+
+  if (!packageId || !script || !audioUrl) {
+    return NextResponse.json({ error: 'Missing packageId, script, or audioUrl' }, { status: 400 })
+  }
+
+  try {
+    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' })
+  } catch {
+    return NextResponse.json({ error: 'FFmpeg not installed. Run: brew install ffmpeg' }, { status: 500 })
+  }
+
+  mkdirSync(TMP, { recursive: true })
+
+  const audioPath      = join(TMP, `${packageId}.mp3`)
+  const bgPngPath      = join(TMP, `${packageId}_bg.png`)
+  const bgComposedPath = join(TMP, `${packageId}_bgc.mp4`)
+  const concatPath     = join(TMP, `${packageId}_captions.txt`)
+  const videoPath      = join(TMP, `${packageId}.mp4`)
+  const clipPaths: string[] = []
+  const pngPaths: string[] = []
+  let bgComposed = false
+  let hasSingleClip = false
+  let singleClipPath = ''
+
+  try {
+    // 1. Download voiceover
+    const audioRes = await fetch(audioUrl)
+    if (!audioRes.ok) throw new Error('Failed to download voiceover audio')
+    writeFileSync(audioPath, Buffer.from(await audioRes.arrayBuffer()))
+
+    // 2. Get audio duration
+    const probeOut = execFileSync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', audioPath,
+    ]).toString().trim()
+    const duration = parseFloat(probeOut)
+    if (!duration || isNaN(duration)) throw new Error('Could not determine audio duration')
+
+    // ── 3. Background resolution (priority: manual URL → AI provider → Pexels clips → gradient) ──
+
+    const pexelsKey = process.env.PEXELS_API_KEY
+    const aiProvider = getVideoProvider()
+
+    if (bgVideoUrl) {
+      // Manual override
+      const p = join(TMP, `${packageId}_clip0.mp4`)
+      if (await downloadFile(bgVideoUrl, p)) {
+        clipPaths.push(p)
+        hasSingleClip = true
+        singleClipPath = p
+      }
+
+    } else if (aiProvider) {
+      // ── AI generation (Runway / future Pika) ──────────────────────────────
+      // Always 5s clips — more scene switches = higher retention than fewer longer clips
+      const clipDuration = 5 as const
+      const numScenes = Math.min(6, Math.max(3, Math.ceil(duration / clipDuration)))
+
+      console.log(`[${aiProvider.name}] Generating ${numScenes} × ${clipDuration}s clips for ${duration.toFixed(1)}s audio`)
+
+      const scenes = await getScenes(script, numScenes)
+
+      // Fetch starting images and generate clips in parallel
+      const results = await Promise.allSettled(
+        scenes.map(async (scene, i) => {
+          // Get starting image (Pexels photo if available, else upload a gradient placeholder)
+          let startImageUrl: string | null = null
+          if (pexelsKey) {
+            startImageUrl = await fetchPexelsPhoto(scene.imageQuery, pexelsKey)
+          }
+          if (!startImageUrl) {
+            // Upload a dark gradient to Supabase as a fallback starting frame
+            const tmpImg = join(TMP, `${packageId}_start${i}.png`)
+            await buildGradientBg(tmpImg)
+            const supabase = getSupabaseAdmin()
+            const imgBuf = readFileSync(tmpImg)
+            unlinkSync(tmpImg)
+            const imgKey = `scene-starters/${packageId}_${i}.png`
+            await supabase.storage.from('videos').upload(imgKey, imgBuf, { contentType: 'image/png', upsert: true })
+            const { data: { publicUrl } } = supabase.storage.from('videos').getPublicUrl(imgKey)
+            startImageUrl = publicUrl
+          }
+
+          const clipUrl = await aiProvider.generateClip({
+            prompt: scene.prompt,
+            startImageUrl,
+            durationSeconds: clipDuration,
+          })
+
+          const p = join(TMP, `${packageId}_clip${i}.mp4`)
+          const ok = await downloadFile(clipUrl, p)
+          if (!ok) throw new Error(`Failed to download clip ${i}`)
+          return p
+        })
+      )
+
+      for (const r of results) {
+        if (r.status === 'fulfilled') clipPaths.push(r.value)
+        else console.warn(`[${aiProvider.name}] Clip failed:`, r.reason)
+      }
+
+      if (clipPaths.length === 0) {
+        // All AI clips failed — fall through to Pexels or gradient below
+        console.warn(`[${aiProvider.name}] All clips failed, falling back`)
+      } else if (clipPaths.length === 1) {
+        hasSingleClip = true
+        singleClipPath = clipPaths[0]
+      } else {
+        const segDur = duration / clipPaths.length
+        composeBackground(clipPaths, segDur, bgComposedPath)
+        bgComposed = true
+      }
+    }
+
+    // ── Pexels video clips (fallback when no AI provider or AI failed) ────────
+    if (!bgComposed && !hasSingleClip && pexelsKey) {
+      const numScenes = Math.min(6, Math.max(3, Math.ceil(script.split(/\s+/).length / 15)))
+      let sceneQueries: string[] = []
+      try {
+        const qRes = await anthropic.messages.create({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 150,
+          messages: [{
+            role: 'user',
+            content: `For this TikTok script, generate ${numScenes} visually diverse 2-3 word Pexels video search queries for background footage. Each query must represent a completely different visual — vary between people, places, objects, and environments. Return ONLY a JSON array of ${numScenes} strings.\n\n${script}`,
+          }],
+        })
+        const raw = qRes.content[0].type === 'text' ? qRes.content[0].text : '[]'
+        sceneQueries = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
+      } catch { /* non-fatal */ }
+      if (!sceneQueries.length) sceneQueries = ['person talking phone', 'city street night', 'laptop coffee work']
+
+      const downloadResults = await Promise.allSettled(
+        sceneQueries.slice(0, numScenes).map(async (query, i) => {
+          const url = await fetchPexelsVideo(query, pexelsKey)
+          if (!url) throw new Error('no url')
+          const p = join(TMP, `${packageId}_clip${i}.mp4`)
+          if (!await downloadFile(url, p)) throw new Error('download failed')
+          return p
+        })
+      )
+      for (const r of downloadResults) {
+        if (r.status === 'fulfilled') clipPaths.push(r.value)
+      }
+      if (clipPaths.length === 1) {
+        hasSingleClip = true
+        singleClipPath = clipPaths[0]
+      } else if (clipPaths.length > 1) {
+        const segDur = duration / clipPaths.length
+        composeBackground(clipPaths, segDur, bgComposedPath)
+        bgComposed = true
+      }
+    }
+
+    // ── 4. Highlight words ────────────────────────────────────────────────────
+    let highlightWords: string[] = []
+    try {
+      const hlRes = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 200,
+        messages: [{
+          role: 'user',
+          content: `From this TikTok script, pick 6-8 high-impact words to highlight in red. Return ONLY a JSON array of lowercase words:\n\n${script}`,
+        }],
+      })
+      const raw = hlRes.content[0].type === 'text' ? hlRes.content[0].text : '[]'
+      highlightWords = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
+    } catch { /* non-fatal */ }
+    const highlights = new Set(highlightWords.map((w) => w.toLowerCase()))
+
+    // ── 5. Caption PNGs ───────────────────────────────────────────────────────
+    if (!bgComposed && !hasSingleClip) await buildGradientBg(bgPngPath)
+
+    // Try to load word-level timestamps for accurate caption timing
+    let captionChunks: CaptionChunk[] | null = null
+    try {
+      const supabaseForTimings = getSupabaseAdmin()
+      const { data: { publicUrl: timingsUrl } } = supabaseForTimings.storage
+        .from('voiceovers')
+        .getPublicUrl(`${packageId}_timestamps.json`)
+      const timingsRes = await fetch(timingsUrl)
+      if (timingsRes.ok) {
+        const wordTimings: WordTiming[] = await timingsRes.json()
+        if (Array.isArray(wordTimings) && wordTimings.length > 0) {
+          captionChunks = buildTimedChunks(wordTimings, 3)
+          console.log(`[captions] Using ElevenLabs timestamps — ${captionChunks.length} chunks`)
+        }
+      }
+    } catch {
+      // Non-fatal — fall through to equal distribution
+    }
+
+    // Fallback: equal distribution, 3 words per chunk
+    if (!captionChunks) {
+      console.log('[captions] No timestamps found — using equal distribution')
+      const words = script.split(/\s+/).filter(Boolean)
+      const chunkDur = duration / Math.ceil(words.length / 3)
+      captionChunks = []
+      for (let i = 0; i < words.length; i += 3) {
+        captionChunks.push({ words: words.slice(i, i + 3), start: 0, duration: chunkDur })
+      }
+    }
+
+    for (let i = 0; i < captionChunks.length; i++) {
+      const p = join(TMP, `${packageId}_cap${i}.png`)
+      await sharp(Buffer.from(buildCaptionSVG(captionChunks[i].words, highlights))).png().toFile(p)
+      pngPaths.push(p)
+    }
+
+    // Build ffconcat with accurate per-chunk durations
+    const concatLines = ['ffconcat version 1.0']
+    for (let i = 0; i < captionChunks.length; i++) {
+      concatLines.push(`file '${pngPaths[i]}'`, `duration ${captionChunks[i].duration.toFixed(4)}`)
+    }
+    concatLines.push(`file '${pngPaths[pngPaths.length - 1]}'`) // required trailing entry
+    writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
+
+    // ── 6. Final composition ──────────────────────────────────────────────────
+    // Always stream-loop the background so float-rounding never leaves the
+    // final frame frozen if the bg is 1-2 frames shorter than the audio.
+    const bgArgs: string[] = bgComposed
+      ? ['-stream_loop', '-1', '-i', bgComposedPath]  // already 1080×1920 @ 30fps
+      : hasSingleClip
+        ? ['-stream_loop', '-1', '-i', singleClipPath]
+        : ['-loop', '1', '-i', bgPngPath]
+
+    const bgFilter: string = bgComposed
+      ? '[0:v]null[bg]'  // passthrough — compose already normalised size + fps
+      : hasSingleClip
+        ? '[0:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg]'
+        : '[0:v]scale=1080:1920[bg]'
+
+    execFileSync('ffmpeg', [
+      '-y',
+      ...bgArgs,
+      '-i', audioPath,
+      '-f', 'concat', '-safe', '0', '-i', concatPath,
+      '-filter_complex',
+      `${bgFilter};[2:v]fps=30,format=rgba[cap];[bg][cap]overlay=0:0[vout]`,
+      '-map', '[vout]',
+      '-map', '1:a',
+      '-t', String(duration),
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
+      '-c:a', 'aac', '-b:a', '192k',
+      '-movflags', '+faststart',
+      videoPath,
+    ], { timeout: 240_000 })
+
+    // ── 7. Upload ─────────────────────────────────────────────────────────────
+    const supabase = getSupabaseAdmin()
+    const { error: uploadErr } = await supabase.storage
+      .from('videos')
+      .upload(`${packageId}.mp4`, readFileSync(videoPath), { contentType: 'video/mp4', upsert: true })
+    if (uploadErr) throw new Error(`Storage upload failed: ${uploadErr.message}`)
+
+    const { data: { publicUrl } } = supabase.storage.from('videos').getPublicUrl(`${packageId}.mp4`)
+    await supabase.from('content_packages').update({ video_url: publicUrl }).eq('id', packageId)
+
+    return NextResponse.json({ videoUrl: publicUrl })
+
+  } finally {
+    for (const p of [audioPath, bgPngPath, bgComposedPath, concatPath, videoPath, ...clipPaths, ...pngPaths]) {
+      if (existsSync(p)) unlinkSync(p)
+    }
+  }
+}

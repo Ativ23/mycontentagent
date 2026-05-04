@@ -3,16 +3,50 @@ import { execFileSync } from 'child_process'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import sharp from 'sharp'
+import { parseFile as parseAudioFile } from 'music-metadata'
+import ffmpegStaticPath from 'ffmpeg-static'
 import { getSupabaseAdmin } from '@/lib/supabase'
 import { anthropic } from '@/lib/anthropic'
 import { getVideoProvider } from '@/lib/video-providers'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300 // 5-min timeout for AI generation
+export const maxDuration = 300
 
 const TMP = '/tmp/mycontentagent'
 const VID_W = 1080
 const VID_H = 1920
+
+// ─── FFmpeg binary resolution ─────────────────────────────────────────────────
+// Prefers a system install; falls back to the bundled static binary (works on Vercel).
+
+function resolveFfmpegPath(): string | null {
+  // 1. System FFmpeg (local dev with brew install ffmpeg)
+  try {
+    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' })
+    return 'ffmpeg'
+  } catch { /* not on PATH */ }
+
+  // 2. Bundled static binary (Vercel / any Node environment without system ffmpeg)
+  if (ffmpegStaticPath && existsSync(ffmpegStaticPath)) return ffmpegStaticPath
+
+  return null
+}
+
+const FFMPEG_PATH = resolveFfmpegPath()
+
+function ffmpeg(args: string[], opts?: { timeout?: number }) {
+  if (!FFMPEG_PATH) throw new Error('VIDEO_UNAVAILABLE')
+  return execFileSync(FFMPEG_PATH, args, { timeout: opts?.timeout ?? 120_000 })
+}
+
+// ─── Audio duration (pure JS — no ffprobe needed) ────────────────────────────
+
+async function getAudioDuration(filePath: string): Promise<number> {
+  const meta = await parseAudioFile(filePath)
+  const dur = meta.format.duration
+  if (!dur || isNaN(dur)) throw new Error('Could not determine audio duration')
+  return dur
+}
 
 // ─── Caption rendering ────────────────────────────────────────────────────────
 
@@ -108,7 +142,7 @@ async function downloadFile(url: string, dest: string): Promise<boolean> {
     const res = await fetch(url)
     if (!res.ok) return false
     const buf = Buffer.from(await res.arrayBuffer())
-    if (buf.length < 1024) return false // reject suspiciously small files
+    if (buf.length < 1024) return false
     writeFileSync(dest, buf)
     return true
   } catch { return false }
@@ -166,7 +200,6 @@ ${script}`,
     const parsed = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]') as Scene[]
     if (parsed.length === numScenes) return parsed
   } catch { /* fall through */ }
-  // Fallback scenes if parsing fails
   return Array.from({ length: numScenes }, (_, i) => ({
     prompt: `Person talking to camera with confident expression, cinematic lighting, vertical portrait format, smooth camera movement scene ${i + 1}`,
     imageQuery: 'person talking portrait',
@@ -175,12 +208,7 @@ ${script}`,
 
 // ─── Compose multi-clip background ───────────────────────────────────────────
 
-function composeBackground(
-  clipPaths: string[],
-  segDur: number,
-  outputPath: string
-) {
-  // Each clip: loop if shorter than segDur, trim if longer, normalise to 30 fps + 1080x1920
+function composeBackground(clipPaths: string[], segDur: number, outputPath: string) {
   const inputs = clipPaths.flatMap((p) => ['-stream_loop', '-1', '-t', segDur.toFixed(3), '-i', p])
   const filters = clipPaths.map((_, i) =>
     `[${i}:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setpts=PTS-STARTPTS[v${i}]`
@@ -188,7 +216,7 @@ function composeBackground(
   const concatPart = clipPaths.map((_, i) => `[v${i}]`).join('') +
     `concat=n=${clipPaths.length}:v=1:a=0[bgout]`
 
-  execFileSync('ffmpeg', [
+  ffmpeg([
     '-y',
     ...inputs,
     '-filter_complex', [...filters, concatPart].join(';'),
@@ -208,10 +236,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing packageId, script, or audioUrl' }, { status: 400 })
   }
 
-  try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' })
-  } catch {
-    return NextResponse.json({ error: 'FFmpeg not installed. Run: brew install ffmpeg' }, { status: 500 })
+  // Early check — return a clean error rather than crashing mid-request
+  if (!FFMPEG_PATH) {
+    return NextResponse.json(
+      { error: 'VIDEO_UNAVAILABLE', message: 'Video rendering is not available in this environment.' },
+      { status: 503 }
+    )
   }
 
   mkdirSync(TMP, { recursive: true })
@@ -233,21 +263,15 @@ export async function POST(req: NextRequest) {
     if (!audioRes.ok) throw new Error('Failed to download voiceover audio')
     writeFileSync(audioPath, Buffer.from(await audioRes.arrayBuffer()))
 
-    // 2. Get audio duration
-    const probeOut = execFileSync('ffprobe', [
-      '-v', 'error', '-show_entries', 'format=duration',
-      '-of', 'default=noprint_wrappers=1:nokey=1', audioPath,
-    ]).toString().trim()
-    const duration = parseFloat(probeOut)
-    if (!duration || isNaN(duration)) throw new Error('Could not determine audio duration')
+    // 2. Audio duration via music-metadata (no ffprobe needed)
+    const duration = await getAudioDuration(audioPath)
 
-    // ── 3. Background resolution (priority: manual URL → AI provider → Pexels clips → gradient) ──
+    // ── 3. Background resolution ──────────────────────────────────────────────
 
     const pexelsKey = process.env.PEXELS_API_KEY
     const aiProvider = getVideoProvider()
 
     if (bgVideoUrl) {
-      // Manual override
       const p = join(TMP, `${packageId}_clip0.mp4`)
       if (await downloadFile(bgVideoUrl, p)) {
         clipPaths.push(p)
@@ -256,8 +280,6 @@ export async function POST(req: NextRequest) {
       }
 
     } else if (aiProvider) {
-      // ── AI generation (Runway / future Pika) ──────────────────────────────
-      // Always 5s clips — more scene switches = higher retention than fewer longer clips
       const clipDuration = 5 as const
       const numScenes = Math.min(6, Math.max(3, Math.ceil(duration / clipDuration)))
 
@@ -265,16 +287,13 @@ export async function POST(req: NextRequest) {
 
       const scenes = await getScenes(script, numScenes)
 
-      // Fetch starting images and generate clips in parallel
       const results = await Promise.allSettled(
         scenes.map(async (scene, i) => {
-          // Get starting image (Pexels photo if available, else upload a gradient placeholder)
           let startImageUrl: string | null = null
           if (pexelsKey) {
             startImageUrl = await fetchPexelsPhoto(scene.imageQuery, pexelsKey)
           }
           if (!startImageUrl) {
-            // Upload a dark gradient to Supabase as a fallback starting frame
             const tmpImg = join(TMP, `${packageId}_start${i}.png`)
             await buildGradientBg(tmpImg)
             const supabase = getSupabaseAdmin()
@@ -305,7 +324,6 @@ export async function POST(req: NextRequest) {
       }
 
       if (clipPaths.length === 0) {
-        // All AI clips failed — fall through to Pexels or gradient below
         console.warn(`[${aiProvider.name}] All clips failed, falling back`)
       } else if (clipPaths.length === 1) {
         hasSingleClip = true
@@ -317,7 +335,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Pexels video clips (fallback when no AI provider or AI failed) ────────
+    // ── Pexels video clips (fallback) ─────────────────────────────────────────
     if (!bgComposed && !hasSingleClip && pexelsKey) {
       const numScenes = Math.min(6, Math.max(3, Math.ceil(script.split(/\s+/).length / 15)))
       let sceneQueries: string[] = []
@@ -376,7 +394,6 @@ export async function POST(req: NextRequest) {
     // ── 5. Caption PNGs ───────────────────────────────────────────────────────
     if (!bgComposed && !hasSingleClip) await buildGradientBg(bgPngPath)
 
-    // Try to load word-level timestamps for accurate caption timing
     let captionChunks: CaptionChunk[] | null = null
     try {
       const supabaseForTimings = getSupabaseAdmin()
@@ -391,11 +408,8 @@ export async function POST(req: NextRequest) {
           console.log(`[captions] Using ElevenLabs timestamps — ${captionChunks.length} chunks`)
         }
       }
-    } catch {
-      // Non-fatal — fall through to equal distribution
-    }
+    } catch { /* non-fatal */ }
 
-    // Fallback: equal distribution, 3 words per chunk
     if (!captionChunks) {
       console.log('[captions] No timestamps found — using equal distribution')
       const words = script.split(/\s+/).filter(Boolean)
@@ -412,30 +426,27 @@ export async function POST(req: NextRequest) {
       pngPaths.push(p)
     }
 
-    // Build ffconcat with accurate per-chunk durations
     const concatLines = ['ffconcat version 1.0']
     for (let i = 0; i < captionChunks.length; i++) {
       concatLines.push(`file '${pngPaths[i]}'`, `duration ${captionChunks[i].duration.toFixed(4)}`)
     }
-    concatLines.push(`file '${pngPaths[pngPaths.length - 1]}'`) // required trailing entry
+    concatLines.push(`file '${pngPaths[pngPaths.length - 1]}'`)
     writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
 
     // ── 6. Final composition ──────────────────────────────────────────────────
-    // Always stream-loop the background so float-rounding never leaves the
-    // final frame frozen if the bg is 1-2 frames shorter than the audio.
     const bgArgs: string[] = bgComposed
-      ? ['-stream_loop', '-1', '-i', bgComposedPath]  // already 1080×1920 @ 30fps
+      ? ['-stream_loop', '-1', '-i', bgComposedPath]
       : hasSingleClip
         ? ['-stream_loop', '-1', '-i', singleClipPath]
         : ['-loop', '1', '-i', bgPngPath]
 
     const bgFilter: string = bgComposed
-      ? '[0:v]null[bg]'  // passthrough — compose already normalised size + fps
+      ? '[0:v]null[bg]'
       : hasSingleClip
         ? '[0:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg]'
         : '[0:v]scale=1080:1920[bg]'
 
-    execFileSync('ffmpeg', [
+    ffmpeg([
       '-y',
       ...bgArgs,
       '-i', audioPath,

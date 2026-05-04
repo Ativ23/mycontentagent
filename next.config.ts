@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  serverExternalPackages: ['sharp', 'ffmpeg-static', 'music-metadata'],
 };
 
 export default nextConfig;

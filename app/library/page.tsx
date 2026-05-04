@@ -64,15 +64,18 @@ export default function LibraryPage() {
         body: JSON.stringify({ packageId: pkg.id, script: pkg.script, audioUrl: pkg.audio_url, bgVideoUrl: bgVideoUrls[pkg.id] || undefined }),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to generate video')
+      if (!res.ok) {
+        if (data.error === 'VIDEO_UNAVAILABLE') {
+          throw new Error('VIDEO_UNAVAILABLE')
+        }
+        throw new Error(data.error || 'Failed to generate video')
+      }
       setPackages((prev) =>
         prev.map((p) => (p.id === pkg.id ? { ...p, video_url: data.videoUrl } : p))
       )
     } catch (e: unknown) {
-      setVideoErrors((prev) => ({
-        ...prev,
-        [pkg.id]: e instanceof Error ? e.message : 'Failed to generate video',
-      }))
+      const msg = e instanceof Error ? e.message : 'Failed to generate video'
+      setVideoErrors((prev) => ({ ...prev, [pkg.id]: msg }))
     } finally {
       setVideoLoading(null)
     }
@@ -312,31 +315,47 @@ export default function LibraryPage() {
                         </div>
                       ) : (
                         <div className="mt-2">
-                          <div className="mb-2">
-                            <label className="block text-xs text-[#8884a8] mb-1">Background Video URL <span className="text-[#555566]">(optional)</span></label>
-                            <input
-                              type="url"
-                              value={bgVideoUrls[pkg.id] || ''}
-                              onChange={(e) => setBgVideoUrls((prev) => ({ ...prev, [pkg.id]: e.target.value }))}
-                              placeholder="https://example.com/background.mp4"
-                              className="w-full bg-[#0a0a0f] border border-[#2a2a3a] rounded-lg px-3 py-2 text-white text-xs placeholder-[#555566] focus:outline-none focus:border-violet-600"
-                            />
-                          </div>
-                          {videoErrors[pkg.id] && (
-                            <p className="text-red-400 text-xs mb-2">{videoErrors[pkg.id]}</p>
+                          {videoErrors[pkg.id] === 'VIDEO_UNAVAILABLE' ? (
+                            <div className="bg-[#0a0a0f] border border-[#2a2a3a] rounded-xl p-4 text-center">
+                              <p className="text-2xl mb-2">🎬</p>
+                              <p className="text-white text-sm font-medium">Video rendering not available yet</p>
+                              <p className="text-[#8884a8] text-xs mt-1">Coming soon. Your script and voiceover are ready — download them below.</p>
+                              <button
+                                onClick={() => setVideoErrors((prev) => ({ ...prev, [pkg.id]: '' }))}
+                                className="mt-3 text-xs text-[#8884a8] hover:text-white underline transition-colors"
+                              >
+                                Try again
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="mb-2">
+                                <label className="block text-xs text-[#8884a8] mb-1">Background Video URL <span className="text-[#555566]">(optional)</span></label>
+                                <input
+                                  type="url"
+                                  value={bgVideoUrls[pkg.id] || ''}
+                                  onChange={(e) => setBgVideoUrls((prev) => ({ ...prev, [pkg.id]: e.target.value }))}
+                                  placeholder="https://example.com/background.mp4"
+                                  className="w-full bg-[#0a0a0f] border border-[#2a2a3a] rounded-lg px-3 py-2 text-white text-xs placeholder-[#555566] focus:outline-none focus:border-violet-600"
+                                />
+                              </div>
+                              {videoErrors[pkg.id] && (
+                                <p className="text-red-400 text-xs mb-2">{videoErrors[pkg.id]}</p>
+                              )}
+                              <button
+                                onClick={() => generateVideo(pkg)}
+                                disabled={videoLoading === pkg.id}
+                                className="w-full py-2.5 rounded-lg border border-[#3a3a4a] text-white hover:bg-[#1a1a24] disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium transition-colors"
+                              >
+                                {videoLoading === pkg.id ? (
+                                  <span className="flex items-center justify-center gap-2">
+                                    <span className="inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                    Creating video...
+                                  </span>
+                                ) : '▶ Create Video'}
+                              </button>
+                            </>
                           )}
-                          <button
-                            onClick={() => generateVideo(pkg)}
-                            disabled={videoLoading === pkg.id}
-                            className="w-full py-2.5 rounded-lg border border-[#3a3a4a] text-white hover:bg-[#1a1a24] disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium transition-colors"
-                          >
-                            {videoLoading === pkg.id ? (
-                              <span className="flex items-center justify-center gap-2">
-                                <span className="inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                Creating video...
-                              </span>
-                            ) : '▶ Create Video'}
-                          </button>
                         </div>
                       )}
                     </div>

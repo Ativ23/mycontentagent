@@ -30,6 +30,9 @@ export default function LibraryPage() {
   const [bgVideoUrls, setBgVideoUrls] = useState<Record<string, string>>({})
   const [voices, setVoices] = useState<{ voice_id: string; name: string; category: string; preview_url: string }[]>([])
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<Record<string, string>>({})
+  const [tikTokConnected, setTikTokConnected] = useState(false)
+  const [tikTokPosting, setTikTokPosting] = useState<string | null>(null)
+  const [tikTokResults, setTikTokResults] = useState<Record<string, { success?: boolean; error?: string }>>({})
 
   const niches = ['All', 'Beauty & Skincare', 'Personal Finance', 'Fitness & Health', 'Tech & Gadgets', 'Home & Kitchen', 'Fashion & Style', 'Relationships', 'Food & Recipes', 'Pet Content', 'Digital Products']
 
@@ -41,6 +44,10 @@ export default function LibraryPage() {
     fetch('/api/voices')
       .then((r) => r.json())
       .then((d) => { if (d.voices?.length) setVoices(d.voices) })
+      .catch(() => {})
+    fetch('/api/tiktok/status')
+      .then((r) => r.json())
+      .then((d) => setTikTokConnected(d.connected))
       .catch(() => {})
   }, [])
 
@@ -68,6 +75,29 @@ export default function LibraryPage() {
       }))
     } finally {
       setVideoLoading(null)
+    }
+  }
+
+  const postToTikTok = async (pkg: Package) => {
+    if (!pkg.video_url) return
+    setTikTokPosting(pkg.id)
+    setTikTokResults((prev) => ({ ...prev, [pkg.id]: {} }))
+    try {
+      const res = await fetch('/api/tiktok/post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ videoUrl: pkg.video_url }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Failed to post')
+      setTikTokResults((prev) => ({ ...prev, [pkg.id]: { success: true } }))
+    } catch (e: unknown) {
+      setTikTokResults((prev) => ({
+        ...prev,
+        [pkg.id]: { error: e instanceof Error ? e.message : 'Failed to post to TikTok' },
+      }))
+    } finally {
+      setTikTokPosting(null)
     }
   }
 
@@ -233,13 +263,52 @@ export default function LibraryPage() {
                       {pkg.video_url ? (
                         <div className="mt-2 bg-[#0a0a0f] border border-[#2a2a3a] rounded-xl p-3">
                           <video controls src={pkg.video_url} className="w-full rounded-lg max-h-[360px] mb-3" />
-                          <a
-                            href={pkg.video_url}
-                            download="tiktok-video.mp4"
-                            className="block text-center text-xs px-3 py-2 rounded-md bg-violet-600 hover:bg-violet-500 text-white transition-colors"
-                          >
-                            Download MP4
-                          </a>
+                          <div className="flex gap-2">
+                            <a
+                              href={pkg.video_url}
+                              download="tiktok-video.mp4"
+                              className="flex-1 block text-center text-xs px-3 py-2 rounded-md bg-violet-600 hover:bg-violet-500 text-white transition-colors"
+                            >
+                              Download MP4
+                            </a>
+                            {tikTokConnected ? (
+                              tikTokResults[pkg.id]?.success ? (
+                                <div className="flex-1 flex items-center justify-center gap-1.5 text-xs px-3 py-2 rounded-md bg-green-600/20 border border-green-600/30 text-green-400">
+                                  <span>✓</span> Sent to TikTok
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => postToTikTok(pkg)}
+                                  disabled={tikTokPosting === pkg.id}
+                                  className="flex-1 flex items-center justify-center gap-1.5 text-xs px-3 py-2 rounded-md bg-[#fe2c55]/10 border border-[#fe2c55]/30 text-[#fe2c55] hover:bg-[#fe2c55]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                >
+                                  {tikTokPosting === pkg.id ? (
+                                    <>
+                                      <span className="inline-block w-3 h-3 border-2 border-[#fe2c55]/30 border-t-[#fe2c55] rounded-full animate-spin" />
+                                      Posting...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <svg viewBox="0 0 24 24" className="w-3 h-3 fill-current flex-shrink-0">
+                                        <path d="M19.59 6.69a4.83 4.83 0 01-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 01-2.88 2.5 2.89 2.89 0 01-2.89-2.89 2.89 2.89 0 012.89-2.89c.28 0 .54.04.79.1V9.01a6.33 6.33 0 00-.79-.05 6.34 6.34 0 00-6.34 6.34 6.34 6.34 0 006.34 6.34 6.34 6.34 0 006.33-6.34V8.82a8.28 8.28 0 004.84 1.55V6.92a4.85 4.85 0 01-1.07-.23z"/>
+                                      </svg>
+                                      Post to TikTok
+                                    </>
+                                  )}
+                                </button>
+                              )
+                            ) : (
+                              <Link
+                                href="/settings"
+                                className="flex-1 flex items-center justify-center text-xs px-3 py-2 rounded-md border border-[#2a2a3a] text-[#8884a8] hover:text-white transition-colors"
+                              >
+                                Connect TikTok
+                              </Link>
+                            )}
+                          </div>
+                          {tikTokResults[pkg.id]?.error && (
+                            <p className="mt-2 text-red-400 text-xs">{tikTokResults[pkg.id].error}</p>
+                          )}
                         </div>
                       ) : (
                         <div className="mt-2">

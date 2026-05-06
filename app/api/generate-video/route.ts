@@ -278,172 +278,144 @@ async function handleVideoGeneration(req: NextRequest) {
   let caughtError: string | null = null
 
   try {
-    // 1. Download voiceover
-    const audioRes = await fetch(audioUrl)
-    if (!audioRes.ok) throw new Error('Failed to download voiceover audio')
-    writeFileSync(audioPath, Buffer.from(await audioRes.arrayBuffer()))
+    if (ON_VERCEL) {
+      // ── Vercel fast path ────────────────────────────────────────────────────
+      // No audio download, no music-metadata, no Claude, no Supabase fetches.
+      // Audio URL passed directly to FFmpeg. Captions built in parallel.
+      // Target: complete in <9s on Vercel Hobby (10s limit).
 
-    // 2. Audio duration via music-metadata (no ffprobe needed)
-    const duration = await getAudioDuration(audioPath)
+      await buildGradientBg(bgPngPath)
 
-    // ── 3. Background resolution ──────────────────────────────────────────────
-
-    const pexelsKey = process.env.PEXELS_API_KEY
-    const aiProvider = getVideoProvider()
-
-    if (bgVideoUrl) {
-      const p = join(TMP, `${packageId}_clip0.mp4`)
-      if (await downloadFile(bgVideoUrl, p)) {
-        clipPaths.push(p)
-        hasSingleClip = true
-        singleClipPath = p
+      const words = script.split(/\s+/).filter(Boolean)
+      const CHUNK_DUR = 1.6
+      const vercelChunks: CaptionChunk[] = []
+      for (let i = 0; i < words.length; i += 3) {
+        vercelChunks.push({ words: words.slice(i, i + 3), start: (i / 3) * CHUNK_DUR, duration: CHUNK_DUR })
       }
 
-    } else if (aiProvider) {
-      const clipDuration = 5 as const
-      const numScenes = Math.min(6, Math.max(3, Math.ceil(duration / clipDuration)))
+      const emptyHighlights = new Set<string>()
+      const capPaths: string[] = new Array(vercelChunks.length).fill('')
+      await Promise.all(vercelChunks.map(async (chunk, i) => {
+        const p = join(TMP, `${packageId}_cap${i}.png`)
+        await sharp(Buffer.from(buildCaptionSVG(chunk.words, emptyHighlights))).png().toFile(p)
+        capPaths[i] = p
+      }))
+      pngPaths.push(...capPaths)
 
-      console.log(`[${aiProvider.name}] Generating ${numScenes} × ${clipDuration}s clips for ${duration.toFixed(1)}s audio`)
+      const concatLines = ['ffconcat version 1.0']
+      for (let i = 0; i < vercelChunks.length; i++) {
+        concatLines.push(`file '${capPaths[i]}'`, `duration ${vercelChunks[i].duration.toFixed(4)}`)
+      }
+      concatLines.push(`file '${capPaths[capPaths.length - 1]}'`)
+      writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
 
-      const scenes = await getScenes(script, numScenes)
+      ffmpeg([
+        '-y',
+        '-loop', '1', '-i', bgPngPath,
+        '-i', audioUrl,
+        '-f', 'concat', '-safe', '0', '-i', concatPath,
+        '-filter_complex', '[0:v]scale=720:1280[bg];[2:v]fps=24,format=rgba[cap];[bg][cap]overlay=0:0[vout]',
+        '-map', '[vout]', '-map', '1:a',
+        '-shortest',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+        '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart',
+        videoPath,
+      ], { timeout: 25_000 })
 
-      const results = await Promise.allSettled(
-        scenes.map(async (scene, i) => {
-          let startImageUrl: string | null = null
-          if (pexelsKey) {
-            startImageUrl = await fetchPexelsPhoto(scene.imageQuery, pexelsKey)
-          }
+    } else {
+      // ── Local dev full path ─────────────────────────────────────────────────
+      const audioRes = await fetch(audioUrl)
+      if (!audioRes.ok) throw new Error('Failed to download voiceover audio')
+      writeFileSync(audioPath, Buffer.from(await audioRes.arrayBuffer()))
+
+      const duration = await getAudioDuration(audioPath)
+
+      const aiProvider = getVideoProvider()
+      const pexelsKey = process.env.PEXELS_API_KEY
+
+      if (bgVideoUrl) {
+        const p = join(TMP, `${packageId}_clip0.mp4`)
+        if (await downloadFile(bgVideoUrl, p)) { clipPaths.push(p); hasSingleClip = true; singleClipPath = p }
+      } else if (aiProvider) {
+        const clipDuration = 5 as const
+        const numScenes = Math.min(6, Math.max(3, Math.ceil(duration / clipDuration)))
+        const scenes = await getScenes(script, numScenes)
+        const results = await Promise.allSettled(scenes.map(async (scene, i) => {
+          let startImageUrl: string | null = pexelsKey ? await fetchPexelsPhoto(scene.imageQuery, pexelsKey) : null
           if (!startImageUrl) {
             const tmpImg = join(TMP, `${packageId}_start${i}.png`)
             await buildGradientBg(tmpImg)
             const supabase = getSupabaseAdmin()
-            const imgBuf = readFileSync(tmpImg)
-            unlinkSync(tmpImg)
+            const imgBuf = readFileSync(tmpImg); unlinkSync(tmpImg)
             const imgKey = `scene-starters/${packageId}_${i}.png`
             await supabase.storage.from('videos').upload(imgKey, imgBuf, { contentType: 'image/png', upsert: true })
             const { data: { publicUrl } } = supabase.storage.from('videos').getPublicUrl(imgKey)
             startImageUrl = publicUrl
           }
-
-          const clipUrl = await aiProvider.generateClip({
-            prompt: scene.prompt,
-            startImageUrl,
-            durationSeconds: clipDuration,
-          })
-
+          const clipUrl = await aiProvider.generateClip({ prompt: scene.prompt, startImageUrl, durationSeconds: clipDuration })
           const p = join(TMP, `${packageId}_clip${i}.mp4`)
-          const ok = await downloadFile(clipUrl, p)
-          if (!ok) throw new Error(`Failed to download clip ${i}`)
+          if (!await downloadFile(clipUrl, p)) throw new Error(`Failed to download clip ${i}`)
           return p
-        })
-      )
-
-      for (const r of results) {
-        if (r.status === 'fulfilled') clipPaths.push(r.value)
-        else console.warn(`[${aiProvider.name}] Clip failed:`, r.reason)
+        }))
+        for (const r of results) { if (r.status === 'fulfilled') clipPaths.push(r.value) }
+        if (clipPaths.length === 1) { hasSingleClip = true; singleClipPath = clipPaths[0] }
+        else if (clipPaths.length > 1) { composeBackground(clipPaths, duration / clipPaths.length, bgComposedPath); bgComposed = true }
       }
 
-      if (clipPaths.length === 0) {
-        console.warn(`[${aiProvider.name}] All clips failed, falling back`)
-      } else if (clipPaths.length === 1) {
-        hasSingleClip = true
-        singleClipPath = clipPaths[0]
-      } else {
-        const segDur = duration / clipPaths.length
-        composeBackground(clipPaths, segDur, bgComposedPath)
-        bgComposed = true
-      }
-    }
-
-    // ── 4. Highlight words (skip on Vercel to stay within 10s limit) ────────────
-    let highlightWords: string[] = []
-    if (!ON_VERCEL) {
+      let highlightWords: string[] = []
       try {
         const hlRes = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 200,
-          messages: [{
-            role: 'user',
-            content: `From this TikTok script, pick 6-8 high-impact words to highlight in red. Return ONLY a JSON array of lowercase words:\n\n${script}`,
-          }],
+          model: 'claude-sonnet-4-6', max_tokens: 200,
+          messages: [{ role: 'user', content: `From this TikTok script, pick 6-8 high-impact words to highlight in red. Return ONLY a JSON array of lowercase words:\n\n${script}` }],
         })
         const raw = hlRes.content[0].type === 'text' ? hlRes.content[0].text : '[]'
         highlightWords = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
       } catch { /* non-fatal */ }
-    }
-    const highlights = new Set(highlightWords.map((w) => w.toLowerCase()))
+      const highlights = new Set(highlightWords.map((w) => w.toLowerCase()))
 
-    // ── 5. Caption PNGs ───────────────────────────────────────────────────────
-    if (!bgComposed && !hasSingleClip) await buildGradientBg(bgPngPath)
+      if (!bgComposed && !hasSingleClip) await buildGradientBg(bgPngPath)
 
-    let captionChunks: CaptionChunk[] | null = null
-    try {
-      const supabaseForTimings = getSupabaseAdmin()
-      const { data: { publicUrl: timingsUrl } } = supabaseForTimings.storage
-        .from('voiceovers')
-        .getPublicUrl(`${packageId}_timestamps.json`)
-      const timingsRes = await fetch(timingsUrl)
-      if (timingsRes.ok) {
-        const wordTimings: WordTiming[] = await timingsRes.json()
-        if (Array.isArray(wordTimings) && wordTimings.length > 0) {
-          captionChunks = buildTimedChunks(wordTimings, 3)
-          console.log(`[captions] Using ElevenLabs timestamps — ${captionChunks.length} chunks`)
+      let captionChunks: CaptionChunk[] | null = null
+      try {
+        const supabaseForTimings = getSupabaseAdmin()
+        const { data: { publicUrl: timingsUrl } } = supabaseForTimings.storage.from('voiceovers').getPublicUrl(`${packageId}_timestamps.json`)
+        const timingsRes = await fetch(timingsUrl)
+        if (timingsRes.ok) {
+          const wordTimings: WordTiming[] = await timingsRes.json()
+          if (Array.isArray(wordTimings) && wordTimings.length > 0) captionChunks = buildTimedChunks(wordTimings, 3)
         }
+      } catch { /* non-fatal */ }
+
+      if (!captionChunks) {
+        const words = script.split(/\s+/).filter(Boolean)
+        const chunkDur = duration / Math.ceil(words.length / 3)
+        captionChunks = []
+        for (let i = 0; i < words.length; i += 3) captionChunks.push({ words: words.slice(i, i + 3), start: 0, duration: chunkDur })
       }
-    } catch { /* non-fatal */ }
 
-    if (!captionChunks) {
-      console.log('[captions] No timestamps found — using equal distribution')
-      const words = script.split(/\s+/).filter(Boolean)
-      const chunkDur = duration / Math.ceil(words.length / 3)
-      captionChunks = []
-      for (let i = 0; i < words.length; i += 3) {
-        captionChunks.push({ words: words.slice(i, i + 3), start: 0, duration: chunkDur })
+      for (let i = 0; i < captionChunks.length; i++) {
+        const p = join(TMP, `${packageId}_cap${i}.png`)
+        await sharp(Buffer.from(buildCaptionSVG(captionChunks[i].words, highlights))).png().toFile(p)
+        pngPaths.push(p)
       }
+
+      const concatLines = ['ffconcat version 1.0']
+      for (let i = 0; i < captionChunks.length; i++) concatLines.push(`file '${pngPaths[i]}'`, `duration ${captionChunks[i].duration.toFixed(4)}`)
+      concatLines.push(`file '${pngPaths[pngPaths.length - 1]}'`)
+      writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
+
+      const bgArgs = bgComposed ? ['-stream_loop', '-1', '-i', bgComposedPath] : hasSingleClip ? ['-stream_loop', '-1', '-i', singleClipPath] : ['-loop', '1', '-i', bgPngPath]
+      const bgFilter = bgComposed ? '[0:v]null[bg]' : hasSingleClip ? '[0:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg]' : '[0:v]scale=1080:1920[bg]'
+
+      ffmpeg([
+        '-y', ...bgArgs, '-i', audioPath, '-f', 'concat', '-safe', '0', '-i', concatPath,
+        '-filter_complex', `${bgFilter};[2:v]fps=30,format=rgba[cap];[bg][cap]overlay=0:0[vout]`,
+        '-map', '[vout]', '-map', '1:a', '-t', String(duration),
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
+        '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', videoPath,
+      ], { timeout: 240_000 })
     }
-
-    for (let i = 0; i < captionChunks.length; i++) {
-      const p = join(TMP, `${packageId}_cap${i}.png`)
-      await sharp(Buffer.from(buildCaptionSVG(captionChunks[i].words, highlights))).png().toFile(p)
-      pngPaths.push(p)
-    }
-
-    const concatLines = ['ffconcat version 1.0']
-    for (let i = 0; i < captionChunks.length; i++) {
-      concatLines.push(`file '${pngPaths[i]}'`, `duration ${captionChunks[i].duration.toFixed(4)}`)
-    }
-    concatLines.push(`file '${pngPaths[pngPaths.length - 1]}'`)
-    writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
-
-    // ── 6. Final composition ──────────────────────────────────────────────────
-    const bgArgs: string[] = bgComposed
-      ? ['-stream_loop', '-1', '-i', bgComposedPath]
-      : hasSingleClip
-        ? ['-stream_loop', '-1', '-i', singleClipPath]
-        : ['-loop', '1', '-i', bgPngPath]
-
-    const bgFilter: string = bgComposed
-      ? '[0:v]null[bg]'
-      : hasSingleClip
-        ? '[0:v]fps=30,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg]'
-        : '[0:v]scale=1080:1920[bg]'
-
-    ffmpeg([
-      '-y',
-      ...bgArgs,
-      '-i', audioPath,
-      '-f', 'concat', '-safe', '0', '-i', concatPath,
-      '-filter_complex',
-      `${bgFilter};[2:v]fps=30,format=rgba[cap];[bg][cap]overlay=0:0[vout]`,
-      '-map', '[vout]',
-      '-map', '1:a',
-      '-t', String(duration),
-      '-r', ON_VERCEL ? '24' : '30',
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
-      '-c:a', 'aac', '-b:a', '128k',
-      '-movflags', '+faststart',
-      videoPath,
-    ], { timeout: 240_000 })
 
     // ── 7. Upload ─────────────────────────────────────────────────────────────
     const supabase = getSupabaseAdmin()

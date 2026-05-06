@@ -337,46 +337,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Pexels video clips (fallback) ─────────────────────────────────────────
-    if (!bgComposed && !hasSingleClip && pexelsKey) {
-      const numScenes = Math.min(6, Math.max(3, Math.ceil(script.split(/\s+/).length / 15)))
-      let sceneQueries: string[] = []
-      try {
-        const qRes = await anthropic.messages.create({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 150,
-          messages: [{
-            role: 'user',
-            content: `For this TikTok script, generate ${numScenes} visually diverse 2-3 word Pexels video search queries for background footage. Each query must represent a completely different visual — vary between people, places, objects, and environments. Return ONLY a JSON array of ${numScenes} strings.\n\n${script}`,
-          }],
-        })
-        const raw = qRes.content[0].type === 'text' ? qRes.content[0].text : '[]'
-        sceneQueries = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
-      } catch { /* non-fatal */ }
-      if (!sceneQueries.length) sceneQueries = ['person talking phone', 'city street night', 'laptop coffee work']
-
-      const downloadResults = await Promise.allSettled(
-        sceneQueries.slice(0, numScenes).map(async (query, i) => {
-          const url = await fetchPexelsVideo(query, pexelsKey)
-          if (!url) throw new Error('no url')
-          const p = join(TMP, `${packageId}_clip${i}.mp4`)
-          if (!await downloadFile(url, p)) throw new Error('download failed')
-          return p
-        })
-      )
-      for (const r of downloadResults) {
-        if (r.status === 'fulfilled') clipPaths.push(r.value)
-      }
-      if (clipPaths.length === 1) {
-        hasSingleClip = true
-        singleClipPath = clipPaths[0]
-      } else if (clipPaths.length > 1) {
-        const segDur = duration / clipPaths.length
-        composeBackground(clipPaths, segDur, bgComposedPath)
-        bgComposed = true
-      }
-    }
-
     // ── 4. Highlight words ────────────────────────────────────────────────────
     let highlightWords: string[] = []
     try {
@@ -458,7 +418,7 @@ export async function POST(req: NextRequest) {
       '-map', '[vout]',
       '-map', '1:a',
       '-t', String(duration),
-      '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
       '-c:a', 'aac', '-b:a', '192k',
       '-movflags', '+faststart',
       videoPath,

@@ -22,14 +22,14 @@ const VID_H = ON_VERCEL ? 1280 : 1920
 // Prefers a system install; falls back to the bundled static binary (works on Vercel).
 
 function resolveFfmpegPath(): string | null {
-  // 1. System FFmpeg (local dev with brew install ffmpeg)
+  // 1. Bundled static binary first — reliable on Vercel and local
+  if (ffmpegStaticPath && existsSync(ffmpegStaticPath)) return ffmpegStaticPath
+
+  // 2. System FFmpeg fallback (local dev with brew install ffmpeg)
   try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' })
+    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore', timeout: 2000 })
     return 'ffmpeg'
   } catch { /* not on PATH */ }
-
-  // 2. Bundled static binary (Vercel / any Node environment without system ffmpeg)
-  if (ffmpegStaticPath && existsSync(ffmpegStaticPath)) return ffmpegStaticPath
 
   return null
 }
@@ -233,13 +233,28 @@ function composeBackground(clipPaths: string[], segDur: number, outputPath: stri
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
-  const { packageId, script, audioUrl, bgVideoUrl } = await req.json()
+  try {
+    return await handleVideoGeneration(req)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Video generation failed'
+    return NextResponse.json({ error: msg }, { status: 500 })
+  }
+}
+
+async function handleVideoGeneration(req: NextRequest) {
+  const body = await req.text()
+  let packageId: string, script: string, audioUrl: string, bgVideoUrl: string | undefined
+  try {
+    const parsed = JSON.parse(body);
+    ({ packageId, script, audioUrl, bgVideoUrl } = parsed)
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
 
   if (!packageId || !script || !audioUrl) {
     return NextResponse.json({ error: 'Missing packageId, script, or audioUrl' }, { status: 400 })
   }
 
-  // Early check — return a clean error rather than crashing mid-request
   if (!FFMPEG_PATH) {
     return NextResponse.json(
       { error: 'VIDEO_UNAVAILABLE', message: 'Video rendering is not available in this environment.' },

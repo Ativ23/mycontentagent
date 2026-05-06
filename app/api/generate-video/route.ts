@@ -257,6 +257,8 @@ export async function POST(req: NextRequest) {
   let hasSingleClip = false
   let singleClipPath = ''
 
+  let caughtError: string | null = null
+
   try {
     // 1. Download voiceover
     const audioRes = await fetch(audioUrl)
@@ -474,9 +476,19 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ videoUrl: publicUrl })
 
+  } catch (err: unknown) {
+    caughtError = err instanceof Error ? err.message : 'Video generation failed'
   } finally {
     for (const p of [audioPath, bgPngPath, bgComposedPath, concatPath, videoPath, ...clipPaths, ...pngPaths]) {
       if (existsSync(p)) unlinkSync(p)
     }
   }
+
+  if (caughtError === 'VIDEO_UNAVAILABLE') {
+    return NextResponse.json(
+      { error: 'VIDEO_UNAVAILABLE', message: 'Video rendering is not available in this environment.' },
+      { status: 503 }
+    )
+  }
+  return NextResponse.json({ error: caughtError ?? 'Video generation failed' }, { status: 500 })
 }

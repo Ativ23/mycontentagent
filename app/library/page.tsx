@@ -63,12 +63,12 @@ export default function LibraryPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ packageId: pkg.id, script: pkg.script, audioUrl: pkg.audio_url, bgVideoUrl: bgVideoUrls[pkg.id] || undefined }),
       })
-      const data = await res.json()
+      const text = await res.text()
+      let data: { error?: string; videoUrl?: string } = {}
+      try { data = JSON.parse(text) } catch { /* server returned non-JSON */ }
       if (!res.ok) {
-        if (data.error === 'VIDEO_UNAVAILABLE') {
-          throw new Error('VIDEO_UNAVAILABLE')
-        }
-        throw new Error(data.error || 'Failed to generate video')
+        if (data.error === 'VIDEO_UNAVAILABLE') throw new Error('VIDEO_UNAVAILABLE')
+        throw new Error(data.error || `Server error (${res.status})`)
       }
       setPackages((prev) =>
         prev.map((p) => (p.id === pkg.id ? { ...p, video_url: data.videoUrl } : p))

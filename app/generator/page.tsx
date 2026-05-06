@@ -233,9 +233,11 @@ function GeneratorInner() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ packageId: savedId, script: contentPackage.script, audioUrl, bgVideoUrl: bgVideoUrl || undefined }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to generate video')
-      setVideoUrl(data.videoUrl)
+      const text = await res.text()
+      let data: { error?: string; videoUrl?: string } = {}
+      try { data = JSON.parse(text) } catch { /* server returned non-JSON */ }
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
+      setVideoUrl(data.videoUrl ?? '')
     } catch (e: unknown) {
       setVideoError(e instanceof Error ? e.message : 'Failed to generate video')
     } finally {

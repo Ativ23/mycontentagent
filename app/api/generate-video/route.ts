@@ -13,8 +13,10 @@ export const runtime = 'nodejs'
 export const maxDuration = 300
 
 const TMP = '/tmp/mycontentagent'
-const VID_W = 1080
-const VID_H = 1920
+// Vercel Hobby has a 10s function limit — use lower res to fit within budget
+const ON_VERCEL = !!process.env.VERCEL
+const VID_W = ON_VERCEL ? 720 : 1080
+const VID_H = ON_VERCEL ? 1280 : 1920
 
 // ─── FFmpeg binary resolution ─────────────────────────────────────────────────
 // Prefers a system install; falls back to the bundled static binary (works on Vercel).
@@ -338,20 +340,22 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── 4. Highlight words ────────────────────────────────────────────────────
+    // ── 4. Highlight words (skip on Vercel to stay within 10s limit) ────────────
     let highlightWords: string[] = []
-    try {
-      const hlRes = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 200,
-        messages: [{
-          role: 'user',
-          content: `From this TikTok script, pick 6-8 high-impact words to highlight in red. Return ONLY a JSON array of lowercase words:\n\n${script}`,
-        }],
-      })
-      const raw = hlRes.content[0].type === 'text' ? hlRes.content[0].text : '[]'
-      highlightWords = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
-    } catch { /* non-fatal */ }
+    if (!ON_VERCEL) {
+      try {
+        const hlRes = await anthropic.messages.create({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 200,
+          messages: [{
+            role: 'user',
+            content: `From this TikTok script, pick 6-8 high-impact words to highlight in red. Return ONLY a JSON array of lowercase words:\n\n${script}`,
+          }],
+        })
+        const raw = hlRes.content[0].type === 'text' ? hlRes.content[0].text : '[]'
+        highlightWords = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
+      } catch { /* non-fatal */ }
+    }
     const highlights = new Set(highlightWords.map((w) => w.toLowerCase()))
 
     // ── 5. Caption PNGs ───────────────────────────────────────────────────────
@@ -419,8 +423,9 @@ export async function POST(req: NextRequest) {
       '-map', '[vout]',
       '-map', '1:a',
       '-t', String(duration),
+      '-r', ON_VERCEL ? '24' : '30',
       '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
-      '-c:a', 'aac', '-b:a', '192k',
+      '-c:a', 'aac', '-b:a', '128k',
       '-movflags', '+faststart',
       videoPath,
     ], { timeout: 240_000 })

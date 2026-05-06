@@ -76,6 +76,15 @@ function extractWordTimings(
 }
 
 export async function POST(req: NextRequest) {
+  try {
+    return await handleVoiceover(req)
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Voiceover generation failed'
+    return NextResponse.json({ error: msg }, { status: 500 })
+  }
+}
+
+async function handleVoiceover(req: NextRequest) {
   const { packageId, script, voiceId } = await req.json()
 
   if (!packageId || !script) {

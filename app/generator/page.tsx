@@ -95,9 +95,11 @@ function GeneratorInner() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ niche, tone }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to generate ideas')
-      setIdeas(data.ideas)
+      const text = await res.text()
+      let data: { error?: string; ideas?: Idea[] } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
+      setIdeas(data.ideas ?? [])
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Something went wrong')
     } finally {
@@ -114,10 +116,12 @@ function GeneratorInner() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ script, niche }),
       })
-      const data = await res.json()
+      const text = await res.text()
+      let data: { error?: string; script?: string; checks?: Record<string, { passed: boolean; note: string }>; improved?: boolean } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
       if (!res.ok) throw new Error(data.error)
-      if (data.script) setContentPackage((prev) => prev ? { ...prev, script: data.script } : prev)
-      setEnhanceReport(data)
+      if (data.script) setContentPackage((prev) => prev ? { ...prev, script: data.script! } : prev)
+      setEnhanceReport(data as Parameters<typeof setEnhanceReport>[0])
     } catch {
       // non-fatal — keep original script
     } finally {
@@ -144,8 +148,10 @@ function GeneratorInner() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idea, niche, tone }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to generate package')
+      const text = await res.text()
+      let data: { error?: string; script?: string; caption?: string; hashtags?: string } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
       setContentPackage(data)
       setLoadingPackage(false)
       await enhanceScript(data.script)
@@ -165,8 +171,10 @@ function GeneratorInner() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ script: contentPackage.script, instruction, niche, tone }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to refine script')
+      const text = await res.text()
+      let data: { error?: string; script?: string } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
       setContentPackage((prev) => prev ? { ...prev, script: data.script } : prev)
       setRefineInput('')
     } catch (e: unknown) {
@@ -192,8 +200,10 @@ function GeneratorInner() {
           status: 'saved',
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to save')
+      const text = await res.text()
+      let data: { error?: string; package?: { id: string } } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
       setSaved(true)
       setSavedId(data.package?.id ?? null)
     } catch (e: unknown) {
@@ -213,9 +223,11 @@ function GeneratorInner() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ packageId: savedId, script: contentPackage.script, voiceId: selectedVoiceId || undefined }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to generate voiceover')
-      setAudioUrl(data.audioUrl)
+      const text = await res.text()
+      let data: { error?: string; audioUrl?: string } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
+      setAudioUrl(data.audioUrl ?? '')
     } catch (e: unknown) {
       setVoiceError(e instanceof Error ? e.message : 'Failed to generate voiceover')
     } finally {

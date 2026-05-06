@@ -91,8 +91,10 @@ export default function LibraryPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ videoUrl: pkg.video_url }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to post')
+      const text = await res.text()
+      let data: { error?: string } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
       setTikTokResults((prev) => ({ ...prev, [pkg.id]: { success: true } }))
     } catch (e: unknown) {
       setTikTokResults((prev) => ({
@@ -113,8 +115,10 @@ export default function LibraryPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ packageId: pkg.id, script: pkg.script, voiceId: selectedVoiceIds[pkg.id] || undefined }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to generate voiceover')
+      const text = await res.text()
+      let data: { error?: string; audioUrl?: string } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
       setPackages((prev) =>
         prev.map((p) => (p.id === pkg.id ? { ...p, audio_url: data.audioUrl } : p))
       )

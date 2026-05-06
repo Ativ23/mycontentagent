@@ -152,9 +152,9 @@ function GeneratorInner() {
       let data: { error?: string; script?: string; caption?: string; hashtags?: string } = {}
       try { data = JSON.parse(text) } catch { /* non-JSON */ }
       if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
-      setContentPackage(data)
+      setContentPackage(data as ContentPackage)
       setLoadingPackage(false)
-      await enhanceScript(data.script)
+      await enhanceScript(data.script ?? '')
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Something went wrong')
       setLoadingPackage(false)
@@ -175,7 +175,7 @@ function GeneratorInner() {
       let data: { error?: string; script?: string } = {}
       try { data = JSON.parse(text) } catch { /* non-JSON */ }
       if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
-      setContentPackage((prev) => prev ? { ...prev, script: data.script } : prev)
+      setContentPackage((prev) => prev ? { ...prev, script: data.script ?? prev.script } : prev)
       setRefineInput('')
     } catch (e: unknown) {
       setRefineError(e instanceof Error ? e.message : 'Failed to refine script')

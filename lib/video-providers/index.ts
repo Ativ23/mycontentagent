@@ -14,6 +14,8 @@ import type { VideoProvider } from './types'
  *   3. Add: if (process.env.PIKA_API_KEY) return new PikaProvider(process.env.PIKA_API_KEY)
  */
 export function getVideoProvider(): VideoProvider | null {
+  // Runway generation takes 30-120s per clip — incompatible with Vercel's 10s limit
+  if (process.env.VERCEL) return null
   const runwayKey = process.env.RUNWAYML_API_SECRET
   if (runwayKey) return new RunwayProvider(runwayKey)
   return null

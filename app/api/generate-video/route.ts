@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import sharp from 'sharp'
-import { parseFile as parseAudioFile } from 'music-metadata'
+// music-metadata is ESM-only — imported dynamically inside getAudioDuration
 import ffmpegStaticPath from 'ffmpeg-static'
 import { getSupabaseAdmin } from '@/lib/supabase'
 import { anthropic } from '@/lib/anthropic'
@@ -42,7 +42,8 @@ function ffmpeg(args: string[], opts?: { timeout?: number }) {
 // ─── Audio duration (pure JS — no ffprobe needed) ────────────────────────────
 
 async function getAudioDuration(filePath: string): Promise<number> {
-  const meta = await parseAudioFile(filePath)
+  const { parseFile } = await import('music-metadata')
+  const meta = await parseFile(filePath)
   const dur = meta.format.duration
   if (!dur || isNaN(dur)) throw new Error('Could not determine audio duration')
   return dur

@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { spawnSync } from 'child_process'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import sharp from 'sharp'
-// music-metadata is ESM-only — imported dynamically inside getAudioDuration
+// sharp and music-metadata are ESM/native — imported dynamically to avoid
+// loading their native addons at module init time (crashes Vercel Lambda)
 import ffmpegStaticPath from 'ffmpeg-static'
 import { getSupabaseAdmin } from '@/lib/supabase'
 import { anthropic } from '@/lib/anthropic'
@@ -107,8 +107,7 @@ function buildCaptionSVG(words: string[], highlights: Set<string>): string {
 // ─── Background helpers ───────────────────────────────────────────────────────
 
 async function buildGradientBg(path: string) {
-  // Use Sharp's native create (no SVG / no librsvg dependency) to avoid
-  // native crashes in Lambda environments where librsvg is not bundled.
+  const sharp = (await import('sharp')).default
   await sharp({
     create: { width: VID_W, height: VID_H, channels: 3, background: { r: 14, g: 8, b: 32 } },
   })
@@ -250,6 +249,18 @@ export async function POST(req: NextRequest) {
 }
 
 async function handleVideoGeneration(req: NextRequest) {
+  // Diagnostic probe: returns early with env info to help pinpoint crashes
+  const probe = req.headers.get('x-probe')
+  if (probe) {
+    return NextResponse.json({
+      probe: true,
+      step: probe,
+      on_vercel: ON_VERCEL,
+      ffmpeg_path: FFMPEG_PATH,
+      ffmpeg_null: FFMPEG_PATH === null,
+    })
+  }
+
   const body = await req.text()
   let packageId: string, script: string, audioUrl: string, bgVideoUrl: string | undefined
   try {
@@ -290,11 +301,15 @@ async function handleVideoGeneration(req: NextRequest) {
       // ── Vercel fast path ────────────────────────────────────────────────────
       // Zero Sharp usage — use FFmpeg's built-in lavfi color source for the
       // background so no PNG file / no libvips call can crash the Lambda.
-      // Audio URL passed directly as HTTP input; -shortest stops at audio end.
+      // Download audio first (Lambda outbound network can be restricted for subprocess).
+      const audioRes = await fetch(audioUrl)
+      if (!audioRes.ok) throw new Error(`Failed to download audio: ${audioRes.status}`)
+      writeFileSync(audioPath, Buffer.from(await audioRes.arrayBuffer()))
+
       ffmpeg([
         '-y',
         '-f', 'lavfi', '-i', `color=c=0x0e0820:size=${VID_W}x${VID_H}:rate=24`,
-        '-i', audioUrl,
+        '-i', audioPath,
         '-shortest',
         '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
         '-c:a', 'aac', '-b:a', '128k',
@@ -373,6 +388,7 @@ async function handleVideoGeneration(req: NextRequest) {
         for (let i = 0; i < words.length; i += 3) captionChunks.push({ words: words.slice(i, i + 3), start: 0, duration: chunkDur })
       }
 
+      const sharp = (await import('sharp')).default
       for (let i = 0; i < captionChunks.length; i++) {
         const p = join(TMP, `${packageId}_cap${i}.png`)
         await sharp(Buffer.from(buildCaptionSVG(captionChunks[i].words, highlights))).png().toFile(p)

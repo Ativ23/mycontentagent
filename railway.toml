@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "npx tsx worker/index.ts"
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10

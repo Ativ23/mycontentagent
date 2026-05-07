@@ -27,6 +27,7 @@ export default function LibraryPage() {
   const [voiceErrors, setVoiceErrors] = useState<Record<string, string>>({})
   const [videoLoading, setVideoLoading] = useState<string | null>(null)
   const [videoErrors, setVideoErrors] = useState<Record<string, string>>({})
+  const [videoJobIds, setVideoJobIds] = useState<Record<string, string>>({})
   const [bgVideoUrls, setBgVideoUrls] = useState<Record<string, string>>({})
   const [voices, setVoices] = useState<{ voice_id: string; name: string; category: string; preview_url: string }[]>([])
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<Record<string, string>>({})
@@ -51,6 +52,29 @@ export default function LibraryPage() {
       .catch(() => {})
   }, [])
 
+  useEffect(() => {
+    const activeJobs = Object.entries(videoJobIds)
+    if (activeJobs.length === 0) return
+    const interval = setInterval(async () => {
+      for (const [pkgId, jobId] of activeJobs) {
+        try {
+          const res = await fetch(`/api/generate-video/status?jobId=${jobId}`)
+          const data: { status: string; videoUrl?: string; error?: string } = await res.json()
+          if (data.status === 'complete') {
+            setPackages((prev) => prev.map((p) => p.id === pkgId ? { ...p, video_url: data.videoUrl } : p))
+            setVideoJobIds((prev) => { const n = { ...prev }; delete n[pkgId]; return n })
+            setVideoLoading((cur) => cur === pkgId ? null : cur)
+          } else if (data.status === 'failed') {
+            setVideoErrors((prev) => ({ ...prev, [pkgId]: data.error || 'Video generation failed' }))
+            setVideoJobIds((prev) => { const n = { ...prev }; delete n[pkgId]; return n })
+            setVideoLoading((cur) => cur === pkgId ? null : cur)
+          }
+        } catch { /* keep polling */ }
+      }
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [videoJobIds])
+
   const filtered = filter === 'All' ? packages : packages.filter((p) => p.niche === filter)
 
   const generateVideo = async (pkg: Package) => {
@@ -64,19 +88,15 @@ export default function LibraryPage() {
         body: JSON.stringify({ packageId: pkg.id, script: pkg.script, audioUrl: pkg.audio_url, bgVideoUrl: bgVideoUrls[pkg.id] || undefined }),
       })
       const text = await res.text()
-      let data: { error?: string; videoUrl?: string } = {}
-      try { data = JSON.parse(text) } catch { /* server returned non-JSON */ }
-      if (!res.ok) {
-        if (data.error === 'VIDEO_UNAVAILABLE') throw new Error('VIDEO_UNAVAILABLE')
-        throw new Error(data.error || `Server error (${res.status})`)
+      let data: { error?: string; jobId?: string } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
+      if (data.jobId) {
+        setVideoJobIds((prev) => ({ ...prev, [pkg.id]: data.jobId! }))
       }
-      setPackages((prev) =>
-        prev.map((p) => (p.id === pkg.id ? { ...p, video_url: data.videoUrl } : p))
-      )
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to generate video'
+      const msg = e instanceof Error ? e.message : 'Failed to queue video'
       setVideoErrors((prev) => ({ ...prev, [pkg.id]: msg }))
-    } finally {
       setVideoLoading(null)
     }
   }
@@ -354,7 +374,7 @@ export default function LibraryPage() {
                                 {videoLoading === pkg.id ? (
                                   <span className="flex items-center justify-center gap-2">
                                     <span className="inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                    Creating video...
+                                    Generating video — 1–3 min...
                                   </span>
                                 ) : '▶ Create Video'}
                               </button>

@@ -49,6 +49,7 @@ function GeneratorInner() {
   const [videoLoading, setVideoLoading] = useState(false)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [videoError, setVideoError] = useState('')
+  const [videoJobId, setVideoJobId] = useState<string | null>(null)
   const [bgVideoUrl, setBgVideoUrl] = useState('')
   const [error, setError] = useState('')
   const [voices, setVoices] = useState<{ voice_id: string; name: string; category: string; preview_url: string }[]>([])
@@ -74,6 +75,26 @@ function GeneratorInner() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (n) setNiche(n)
   }, [searchParams])
+
+  useEffect(() => {
+    if (!videoJobId) return
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/generate-video/status?jobId=${videoJobId}`)
+        const data: { status: string; videoUrl?: string; error?: string } = await res.json()
+        if (data.status === 'complete') {
+          setVideoUrl(data.videoUrl ?? '')
+          setVideoJobId(null)
+          setVideoLoading(false)
+        } else if (data.status === 'failed') {
+          setVideoError(data.error || 'Video generation failed')
+          setVideoJobId(null)
+          setVideoLoading(false)
+        }
+      } catch { /* keep polling */ }
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [videoJobId])
 
   const generateIdeas = async () => {
     if (!niche || !tone) return setError('Please select a niche and tone.')
@@ -239,6 +260,7 @@ function GeneratorInner() {
     if (!savedId || !contentPackage || !audioUrl) return
     setVideoLoading(true)
     setVideoError('')
+    setVideoUrl(null)
     try {
       const res = await fetch('/api/generate-video', {
         method: 'POST',
@@ -246,13 +268,12 @@ function GeneratorInner() {
         body: JSON.stringify({ packageId: savedId, script: contentPackage.script, audioUrl, bgVideoUrl: bgVideoUrl || undefined }),
       })
       const text = await res.text()
-      let data: { error?: string; videoUrl?: string } = {}
-      try { data = JSON.parse(text) } catch { /* server returned non-JSON */ }
+      let data: { error?: string; jobId?: string } = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
       if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
-      setVideoUrl(data.videoUrl ?? '')
+      setVideoJobId(data.jobId ?? null)
     } catch (e: unknown) {
-      setVideoError(e instanceof Error ? e.message : 'Failed to generate video')
-    } finally {
+      setVideoError(e instanceof Error ? e.message : 'Failed to queue video')
       setVideoLoading(false)
     }
   }
@@ -582,7 +603,7 @@ function GeneratorInner() {
                 {videoLoading ? (
                   <span className="flex items-center justify-center gap-2">
                     <span className="inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Creating video — this takes ~30 seconds...
+                    Generating video — usually 1–3 minutes...
                   </span>
                 ) : '▶ Create Video'}
               </button>

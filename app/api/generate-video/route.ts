@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { spawnSync } from 'child_process'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
-// sharp and music-metadata are ESM/native — imported dynamically to avoid
-// loading their native addons at module init time (crashes Vercel Lambda)
-import ffmpegStaticPath from 'ffmpeg-static'
+// All heavy imports are deferred — loading native addons or spawning processes
+// at module init time causes Vercel Lambda to be sandbox-killed before any
+// request handler is registered, producing empty HTTP 500s.
 import { getSupabaseAdmin } from '@/lib/supabase'
 import { anthropic } from '@/lib/anthropic'
 import { getVideoProvider } from '@/lib/video-providers'
@@ -23,8 +23,10 @@ const VID_H = ON_VERCEL ? 1280 : 1920
 // platform (avoids a Lambda process crash when the binary exists but can't run).
 
 function resolveFfmpegPath(): string | null {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const staticPath = require('ffmpeg-static') as string | false | null
   const candidates = [
-    ffmpegStaticPath ? String(ffmpegStaticPath) : null,
+    staticPath ? String(staticPath) : null,
     'ffmpeg',
   ]
   for (const candidate of candidates) {
@@ -38,7 +40,10 @@ function resolveFfmpegPath(): string | null {
   return null
 }
 
-const FFMPEG_PATH = resolveFfmpegPath()
+// On Vercel Lambda, spawning a subprocess at module init time triggers a
+// sandbox kill before any request handler is registered (empty HTTP 500).
+// Skip the probe entirely and let the route return VIDEO_UNAVAILABLE instead.
+const FFMPEG_PATH = ON_VERCEL ? null : resolveFfmpegPath()
 
 function ffmpeg(args: string[], opts?: { timeout?: number }) {
   if (!FFMPEG_PATH) throw new Error('VIDEO_UNAVAILABLE')

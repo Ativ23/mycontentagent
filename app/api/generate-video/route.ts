@@ -254,16 +254,15 @@ export async function POST(req: NextRequest) {
 }
 
 async function handleVideoGeneration(req: NextRequest) {
-  // Hard runtime guard — checked here rather than relying on module-level constants
-  // because process.env.VERCEL may be inlined at build time as undefined.
-  if (process.env.VERCEL) {
-    return NextResponse.json(
-      { error: 'VIDEO_UNAVAILABLE', message: 'Video rendering is not available on Vercel. Run locally to generate videos.' },
-      { status: 503 }
-    )
-  }
+  // Unconditional early return — confirms the route itself can respond at all.
+  // Video generation via FFmpeg is not viable on Vercel's serverless platform.
+  return NextResponse.json(
+    { error: 'VIDEO_UNAVAILABLE', message: 'Video rendering is not available on Vercel. Run locally to generate videos.' },
+    { status: 503 }
+  )
 
   // Diagnostic probe: returns early with env info to help pinpoint crashes
+  // eslint-disable-next-line no-unreachable
   const probe = req.headers.get('x-probe')
   if (probe) {
     return NextResponse.json({
@@ -344,7 +343,7 @@ async function handleVideoGeneration(req: NextRequest) {
 
       if (bgVideoUrl) {
         const p = join(TMP, `${packageId}_clip0.mp4`)
-        if (await downloadFile(bgVideoUrl, p)) { clipPaths.push(p); hasSingleClip = true; singleClipPath = p }
+        if (await downloadFile(bgVideoUrl!, p)) { clipPaths.push(p); hasSingleClip = true; singleClipPath = p }
       } else if (aiProvider) {
         const clipDuration = 5 as const
         const numScenes = Math.min(6, Math.max(3, Math.ceil(duration / clipDuration)))
@@ -361,12 +360,12 @@ async function handleVideoGeneration(req: NextRequest) {
             const { data: { publicUrl } } = supabase.storage.from('videos').getPublicUrl(imgKey)
             startImageUrl = publicUrl
           }
-          const clipUrl = await aiProvider.generateClip({ prompt: scene.prompt, startImageUrl, durationSeconds: clipDuration })
+          const clipUrl = await aiProvider!.generateClip({ prompt: scene.prompt, startImageUrl, durationSeconds: clipDuration })
           const p = join(TMP, `${packageId}_clip${i}.mp4`)
           if (!await downloadFile(clipUrl, p)) throw new Error(`Failed to download clip ${i}`)
           return p
         }))
-        for (const r of results) { if (r.status === 'fulfilled') clipPaths.push(r.value) }
+        for (const r of results) { if (r.status === 'fulfilled') clipPaths.push((r as PromiseFulfilledResult<string>).value) }
         if (clipPaths.length === 1) { hasSingleClip = true; singleClipPath = clipPaths[0] }
         else if (clipPaths.length > 1) { composeBackground(clipPaths, duration / clipPaths.length, bgComposedPath); bgComposed = true }
       }
@@ -377,7 +376,7 @@ async function handleVideoGeneration(req: NextRequest) {
           model: 'claude-sonnet-4-6', max_tokens: 200,
           messages: [{ role: 'user', content: `From this TikTok script, pick 6-8 high-impact words to highlight in red. Return ONLY a JSON array of lowercase words:\n\n${script}` }],
         })
-        const raw = hlRes.content[0].type === 'text' ? hlRes.content[0].text : '[]'
+        const raw = hlRes.content[0].type === 'text' ? (hlRes.content[0] as { type: 'text'; text: string }).text : '[]'
         highlightWords = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
       } catch { /* non-fatal */ }
       const highlights = new Set(highlightWords.map((w) => w.toLowerCase()))
@@ -399,18 +398,18 @@ async function handleVideoGeneration(req: NextRequest) {
         const words = script.split(/\s+/).filter(Boolean)
         const chunkDur = duration / Math.ceil(words.length / 3)
         captionChunks = []
-        for (let i = 0; i < words.length; i += 3) captionChunks.push({ words: words.slice(i, i + 3), start: 0, duration: chunkDur })
+        for (let i = 0; i < words.length; i += 3) captionChunks!.push({ words: words.slice(i, i + 3), start: 0, duration: chunkDur })
       }
 
       const sharp = (await import('sharp')).default
-      for (let i = 0; i < captionChunks.length; i++) {
+      for (let i = 0; i < captionChunks!.length; i++) {
         const p = join(TMP, `${packageId}_cap${i}.png`)
-        await sharp(Buffer.from(buildCaptionSVG(captionChunks[i].words, highlights))).png().toFile(p)
+        await sharp(Buffer.from(buildCaptionSVG(captionChunks![i].words, highlights))).png().toFile(p)
         pngPaths.push(p)
       }
 
       const concatLines = ['ffconcat version 1.0']
-      for (let i = 0; i < captionChunks.length; i++) concatLines.push(`file '${pngPaths[i]}'`, `duration ${captionChunks[i].duration.toFixed(4)}`)
+      for (let i = 0; i < captionChunks!.length; i++) concatLines.push(`file '${pngPaths[i]}'`, `duration ${captionChunks![i].duration.toFixed(4)}`)
       concatLines.push(`file '${pngPaths[pngPaths.length - 1]}'`)
       writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
 
@@ -431,7 +430,7 @@ async function handleVideoGeneration(req: NextRequest) {
     const { error: uploadErr } = await supabase.storage
       .from('videos')
       .upload(`${packageId}.mp4`, readFileSync(videoPath), { contentType: 'video/mp4', upsert: true })
-    if (uploadErr) throw new Error(`Storage upload failed: ${uploadErr.message}`)
+    if (uploadErr) throw new Error(`Storage upload failed: ${uploadErr!.message}`)
 
     const { data: { publicUrl } } = supabase.storage.from('videos').getPublicUrl(`${packageId}.mp4`)
     await supabase.from('content_packages').update({ video_url: publicUrl }).eq('id', packageId)
@@ -439,7 +438,7 @@ async function handleVideoGeneration(req: NextRequest) {
     return NextResponse.json({ videoUrl: publicUrl })
 
   } catch (err: unknown) {
-    caughtError = err instanceof Error ? err.message : 'Video generation failed'
+    caughtError = err instanceof Error ? (err as Error).message : 'Video generation failed'
   } finally {
     for (const p of [audioPath, bgPngPath, bgComposedPath, concatPath, videoPath, ...clipPaths, ...pngPaths]) {
       if (existsSync(p)) unlinkSync(p)

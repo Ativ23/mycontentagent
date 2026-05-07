@@ -19,18 +19,22 @@ const VID_W = ON_VERCEL ? 720 : 1080
 const VID_H = ON_VERCEL ? 1280 : 1920
 
 // ─── FFmpeg binary resolution ─────────────────────────────────────────────────
-// Prefers a system install; falls back to the bundled static binary (works on Vercel).
+// Tests the binary by running -version so we know it actually executes on this
+// platform (avoids a Lambda process crash when the binary exists but can't run).
 
 function resolveFfmpegPath(): string | null {
-  // 1. Bundled static binary first — reliable on Vercel and local
-  if (ffmpegStaticPath && existsSync(ffmpegStaticPath)) return ffmpegStaticPath
-
-  // 2. System FFmpeg fallback (local dev with brew install ffmpeg)
-  try {
-    execFileSync('ffmpeg', ['-version'], { stdio: 'ignore', timeout: 2000 })
-    return 'ffmpeg'
-  } catch { /* not on PATH */ }
-
+  const candidates = [
+    ffmpegStaticPath ? String(ffmpegStaticPath) : null,
+    'ffmpeg',
+  ]
+  for (const candidate of candidates) {
+    if (!candidate) continue
+    if (candidate !== 'ffmpeg' && !existsSync(candidate)) continue
+    try {
+      execFileSync(candidate, ['-version'], { stdio: 'pipe', timeout: 5000 })
+      return candidate
+    } catch { /* not usable */ }
+  }
   return null
 }
 
@@ -38,7 +42,7 @@ const FFMPEG_PATH = resolveFfmpegPath()
 
 function ffmpeg(args: string[], opts?: { timeout?: number }) {
   if (!FFMPEG_PATH) throw new Error('VIDEO_UNAVAILABLE')
-  return execFileSync(FFMPEG_PATH, args, { timeout: opts?.timeout ?? 120_000 })
+  return execFileSync(FFMPEG_PATH, args, { stdio: 'pipe', timeout: opts?.timeout ?? 120_000 })
 }
 
 // ─── Audio duration (pure JS — no ffprobe needed) ────────────────────────────
@@ -97,15 +101,13 @@ function buildCaptionSVG(words: string[], highlights: Set<string>): string {
 // ─── Background helpers ───────────────────────────────────────────────────────
 
 async function buildGradientBg(path: string) {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${VID_W}" height="${VID_H}">
-  <defs><radialGradient id="g" cx="50%" cy="38%" r="75%">
-    <stop offset="0%"   stop-color="#1e0e40"/>
-    <stop offset="60%"  stop-color="#0d0820"/>
-    <stop offset="100%" stop-color="#070709"/>
-  </radialGradient></defs>
-  <rect width="${VID_W}" height="${VID_H}" fill="url(#g)"/>
-</svg>`
-  await sharp(Buffer.from(svg)).png().toFile(path)
+  // Use Sharp's native create (no SVG / no librsvg dependency) to avoid
+  // native crashes in Lambda environments where librsvg is not bundled.
+  await sharp({
+    create: { width: VID_W, height: VID_H, channels: 3, background: { r: 14, g: 8, b: 32 } },
+  })
+    .png()
+    .toFile(path)
 }
 
 async function fetchPexelsPhoto(query: string, apiKey: string): Promise<string | null> {
@@ -281,8 +283,8 @@ async function handleVideoGeneration(req: NextRequest) {
     if (ON_VERCEL) {
       // ── Vercel fast path ────────────────────────────────────────────────────
       // No audio download, no music-metadata, no Claude, no Supabase fetches.
-      // Audio URL passed directly to FFmpeg. Captions built in parallel.
-      // Target: complete in <9s on Vercel Hobby (10s limit).
+      // Background uses Sharp.create (no SVG/librsvg). Captions attempt SVG;
+      // if that fails they are skipped so the video still produces.
 
       await buildGradientBg(bgPngPath)
 
@@ -293,35 +295,60 @@ async function handleVideoGeneration(req: NextRequest) {
         vercelChunks.push({ words: words.slice(i, i + 3), start: (i / 3) * CHUNK_DUR, duration: CHUNK_DUR })
       }
 
-      const emptyHighlights = new Set<string>()
+      // Try to generate caption PNGs via SVG. If any fail (e.g. librsvg missing),
+      // fall back to a captions-free video rather than crashing.
+      let captionsOk = false
       const capPaths: string[] = new Array(vercelChunks.length).fill('')
-      await Promise.all(vercelChunks.map(async (chunk, i) => {
-        const p = join(TMP, `${packageId}_cap${i}.png`)
-        await sharp(Buffer.from(buildCaptionSVG(chunk.words, emptyHighlights))).png().toFile(p)
-        capPaths[i] = p
-      }))
-      pngPaths.push(...capPaths)
+      try {
+        const emptyHighlights = new Set<string>()
+        await Promise.all(vercelChunks.map(async (chunk, i) => {
+          const p = join(TMP, `${packageId}_cap${i}.png`)
+          await sharp(Buffer.from(buildCaptionSVG(chunk.words, emptyHighlights))).png().toFile(p)
+          capPaths[i] = p
+        }))
+        pngPaths.push(...capPaths)
+        captionsOk = true
+      } catch { /* SVG not supported — continue without captions */ }
 
-      const concatLines = ['ffconcat version 1.0']
-      for (let i = 0; i < vercelChunks.length; i++) {
-        concatLines.push(`file '${capPaths[i]}'`, `duration ${vercelChunks[i].duration.toFixed(4)}`)
+      let ffmpegArgs: string[]
+      if (captionsOk && capPaths.every(Boolean)) {
+        const concatLines = ['ffconcat version 1.0']
+        for (let i = 0; i < vercelChunks.length; i++) {
+          concatLines.push(`file '${capPaths[i]}'`, `duration ${vercelChunks[i].duration.toFixed(4)}`)
+        }
+        concatLines.push(`file '${capPaths[capPaths.length - 1]}'`)
+        writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
+
+        ffmpegArgs = [
+          '-y',
+          '-loop', '1', '-i', bgPngPath,
+          '-i', audioUrl,
+          '-f', 'concat', '-safe', '0', '-i', concatPath,
+          '-filter_complex', `[0:v]scale=${VID_W}:${VID_H}[bg];[2:v]fps=24,format=rgba[cap];[bg][cap]overlay=0:0[vout]`,
+          '-map', '[vout]', '-map', '1:a',
+          '-shortest',
+          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+          '-c:a', 'aac', '-b:a', '128k',
+          '-movflags', '+faststart',
+          videoPath,
+        ]
+      } else {
+        // No captions — simpler FFmpeg command
+        ffmpegArgs = [
+          '-y',
+          '-loop', '1', '-i', bgPngPath,
+          '-i', audioUrl,
+          '-filter_complex', `[0:v]scale=${VID_W}:${VID_H}[vout]`,
+          '-map', '[vout]', '-map', '1:a',
+          '-shortest',
+          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+          '-c:a', 'aac', '-b:a', '128k',
+          '-movflags', '+faststart',
+          videoPath,
+        ]
       }
-      concatLines.push(`file '${capPaths[capPaths.length - 1]}'`)
-      writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
 
-      ffmpeg([
-        '-y',
-        '-loop', '1', '-i', bgPngPath,
-        '-i', audioUrl,
-        '-f', 'concat', '-safe', '0', '-i', concatPath,
-        '-filter_complex', '[0:v]scale=720:1280[bg];[2:v]fps=24,format=rgba[cap];[bg][cap]overlay=0:0[vout]',
-        '-map', '[vout]', '-map', '1:a',
-        '-shortest',
-        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
-        '-c:a', 'aac', '-b:a', '128k',
-        '-movflags', '+faststart',
-        videoPath,
-      ], { timeout: 25_000 })
+      ffmpeg(ffmpegArgs, { timeout: 55_000 })
 
     } else {
       // ── Local dev full path ─────────────────────────────────────────────────

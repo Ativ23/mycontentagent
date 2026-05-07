@@ -288,73 +288,19 @@ async function handleVideoGeneration(req: NextRequest) {
   try {
     if (ON_VERCEL) {
       // ── Vercel fast path ────────────────────────────────────────────────────
-      // No audio download, no music-metadata, no Claude, no Supabase fetches.
-      // Background uses Sharp.create (no SVG/librsvg). Captions attempt SVG;
-      // if that fails they are skipped so the video still produces.
-
-      await buildGradientBg(bgPngPath)
-
-      const words = script.split(/\s+/).filter(Boolean)
-      const CHUNK_DUR = 1.6
-      const vercelChunks: CaptionChunk[] = []
-      for (let i = 0; i < words.length; i += 3) {
-        vercelChunks.push({ words: words.slice(i, i + 3), start: (i / 3) * CHUNK_DUR, duration: CHUNK_DUR })
-      }
-
-      // Try to generate caption PNGs via SVG. If any fail (e.g. librsvg missing),
-      // fall back to a captions-free video rather than crashing.
-      let captionsOk = false
-      const capPaths: string[] = new Array(vercelChunks.length).fill('')
-      try {
-        const emptyHighlights = new Set<string>()
-        await Promise.all(vercelChunks.map(async (chunk, i) => {
-          const p = join(TMP, `${packageId}_cap${i}.png`)
-          await sharp(Buffer.from(buildCaptionSVG(chunk.words, emptyHighlights))).png().toFile(p)
-          capPaths[i] = p
-        }))
-        pngPaths.push(...capPaths)
-        captionsOk = true
-      } catch { /* SVG not supported — continue without captions */ }
-
-      let ffmpegArgs: string[]
-      if (captionsOk && capPaths.every(Boolean)) {
-        const concatLines = ['ffconcat version 1.0']
-        for (let i = 0; i < vercelChunks.length; i++) {
-          concatLines.push(`file '${capPaths[i]}'`, `duration ${vercelChunks[i].duration.toFixed(4)}`)
-        }
-        concatLines.push(`file '${capPaths[capPaths.length - 1]}'`)
-        writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
-
-        ffmpegArgs = [
-          '-y',
-          '-loop', '1', '-i', bgPngPath,
-          '-i', audioUrl,
-          '-f', 'concat', '-safe', '0', '-i', concatPath,
-          '-filter_complex', `[0:v]scale=${VID_W}:${VID_H}[bg];[2:v]fps=24,format=rgba[cap];[bg][cap]overlay=0:0[vout]`,
-          '-map', '[vout]', '-map', '1:a',
-          '-shortest',
-          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
-          '-c:a', 'aac', '-b:a', '128k',
-          '-movflags', '+faststart',
-          videoPath,
-        ]
-      } else {
-        // No captions — simpler FFmpeg command
-        ffmpegArgs = [
-          '-y',
-          '-loop', '1', '-i', bgPngPath,
-          '-i', audioUrl,
-          '-filter_complex', `[0:v]scale=${VID_W}:${VID_H}[vout]`,
-          '-map', '[vout]', '-map', '1:a',
-          '-shortest',
-          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
-          '-c:a', 'aac', '-b:a', '128k',
-          '-movflags', '+faststart',
-          videoPath,
-        ]
-      }
-
-      ffmpeg(ffmpegArgs, { timeout: 55_000 })
+      // Zero Sharp usage — use FFmpeg's built-in lavfi color source for the
+      // background so no PNG file / no libvips call can crash the Lambda.
+      // Audio URL passed directly as HTTP input; -shortest stops at audio end.
+      ffmpeg([
+        '-y',
+        '-f', 'lavfi', '-i', `color=c=0x0e0820:size=${VID_W}x${VID_H}:rate=24`,
+        '-i', audioUrl,
+        '-shortest',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
+        '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart',
+        videoPath,
+      ], { timeout: 55_000 })
 
     } else {
       // ── Local dev full path ─────────────────────────────────────────────────

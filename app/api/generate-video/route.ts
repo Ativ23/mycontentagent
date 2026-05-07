@@ -10,7 +10,7 @@ import { anthropic } from '@/lib/anthropic'
 import { getVideoProvider } from '@/lib/video-providers'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 
 const TMP = '/tmp/mycontentagent'
 // Vercel Hobby has a 10s function limit — use lower res to fit within budget
@@ -254,6 +254,15 @@ export async function POST(req: NextRequest) {
 }
 
 async function handleVideoGeneration(req: NextRequest) {
+  // Hard runtime guard — checked here rather than relying on module-level constants
+  // because process.env.VERCEL may be inlined at build time as undefined.
+  if (process.env.VERCEL) {
+    return NextResponse.json(
+      { error: 'VIDEO_UNAVAILABLE', message: 'Video rendering is not available on Vercel. Run locally to generate videos.' },
+      { status: 503 }
+    )
+  }
+
   // Diagnostic probe: returns early with env info to help pinpoint crashes
   const probe = req.headers.get('x-probe')
   if (probe) {

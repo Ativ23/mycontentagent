@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { execFileSync } from 'child_process'
+import { spawnSync } from 'child_process'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import sharp from 'sharp'
@@ -30,10 +30,10 @@ function resolveFfmpegPath(): string | null {
   for (const candidate of candidates) {
     if (!candidate) continue
     if (candidate !== 'ffmpeg' && !existsSync(candidate)) continue
-    try {
-      execFileSync(candidate, ['-version'], { stdio: 'pipe', timeout: 5000 })
-      return candidate
-    } catch { /* not usable */ }
+    // Use spawnSync so a bad binary (wrong arch, missing libs) never crashes
+    // the parent process — it just returns a result with .error or status != 0.
+    const probe = spawnSync(candidate, ['-version'], { stdio: 'pipe', timeout: 5000 })
+    if (!probe.error && probe.status === 0) return candidate
   }
   return null
 }
@@ -42,7 +42,13 @@ const FFMPEG_PATH = resolveFfmpegPath()
 
 function ffmpeg(args: string[], opts?: { timeout?: number }) {
   if (!FFMPEG_PATH) throw new Error('VIDEO_UNAVAILABLE')
-  return execFileSync(FFMPEG_PATH, args, { stdio: 'pipe', timeout: opts?.timeout ?? 120_000 })
+  const result = spawnSync(FFMPEG_PATH, args, { stdio: 'pipe', timeout: opts?.timeout ?? 120_000 })
+  if (result.error) throw new Error(`FFmpeg spawn error: ${result.error.message}`)
+  if (result.status !== 0) {
+    const stderr = result.stderr?.toString().slice(-800) ?? ''
+    throw new Error(`FFmpeg exited ${result.status}: ${stderr}`)
+  }
+  return result.stdout
 }
 
 // ─── Audio duration (pure JS — no ffprobe needed) ────────────────────────────

@@ -267,12 +267,41 @@ async function processJob(job: VideoJob) {
   }
 }
 
-// ─── Poll loop ─────────────────────────────────────────────────────────────────
+// ─── Entry point ───────────────────────────────────────────────────────────────
+// In GitHub Actions mode (CI=true): claim and process one job then exit.
+// In server mode (e.g. Railway): poll continuously.
 
 async function run() {
   mkdirSync(TMP, { recursive: true })
-  console.log('Worker started. Polling every', POLL_MS / 1000, 's...')
+  const ci = !!process.env.CI
 
+  if (ci) {
+    console.log('CI mode: processing one pending job then exiting.')
+    const { data: jobs } = await supabase
+      .from('video_jobs')
+      .select('*')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: true })
+      .limit(1)
+
+    if (!jobs || jobs.length === 0) {
+      console.log('No pending jobs.')
+      return
+    }
+
+    const job = jobs[0]
+    const { error: claimErr } = await supabase
+      .from('video_jobs')
+      .update({ status: 'processing', updated_at: new Date().toISOString() })
+      .eq('id', job.id)
+      .eq('status', 'pending')
+
+    if (!claimErr) await processJob(job as VideoJob)
+    return
+  }
+
+  // Server mode: continuous poll
+  console.log('Server mode: polling every', POLL_MS / 1000, 's...')
   while (true) {
     try {
       const { data: jobs } = await supabase
@@ -284,7 +313,6 @@ async function run() {
 
       if (jobs && jobs.length > 0) {
         const job = jobs[0]
-        // Claim atomically — skip if another worker already grabbed it
         const { error: claimErr } = await supabase
           .from('video_jobs')
           .update({ status: 'processing', updated_at: new Date().toISOString() })

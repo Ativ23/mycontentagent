@@ -1,8 +1,10 @@
 import { createClient } from '@supabase/supabase-js'
-import { spawnSync } from 'child_process'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import Anthropic from '@anthropic-ai/sdk'
+import { bundle } from '@remotion/bundler'
+import { renderMedia, selectComposition, ensureBrowser } from '@remotion/renderer'
+import type { Caption } from '@remotion/captions'
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
@@ -11,75 +13,33 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!
 const PEXELS_KEY   = process.env.PEXELS_API_KEY ?? ''
 const POLL_MS      = 5_000
 const TMP          = '/tmp/videoworker'
-const VID_W        = 1080
-const VID_H        = 1920
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY')
   process.exit(1)
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
+const supabase  = createClient(SUPABASE_URL, SUPABASE_KEY)
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null
 
-// ─── FFmpeg ────────────────────────────────────────────────────────────────────
+// ─── Remotion bundle cache ─────────────────────────────────────────────────────
+// Re-used across jobs in server mode so we only webpack-bundle once per process.
 
-function resolveFfmpeg(): string {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const staticPath = require('ffmpeg-static') as string | false | null
-  if (staticPath && existsSync(String(staticPath))) {
-    const r = spawnSync(String(staticPath), ['-version'], { stdio: 'pipe', timeout: 5000 })
-    if (!r.error && r.status === 0) return String(staticPath)
-  }
-  return 'ffmpeg'
-}
+let cachedBundlePath: string | null = null
 
-const FFMPEG = resolveFfmpeg()
-console.log('FFmpeg:', FFMPEG)
-
-function ffmpeg(args: string[], timeoutMs = 240_000) {
-  const r = spawnSync(FFMPEG, args, { stdio: 'pipe', timeout: timeoutMs })
-  if (r.error) throw new Error(`FFmpeg spawn: ${r.error.message}`)
-  if (r.status !== 0) throw new Error(`FFmpeg exit ${r.status}: ${r.stderr?.toString().slice(-600) ?? ''}`)
-}
-
-// ─── Caption helpers ───────────────────────────────────────────────────────────
-
-function xmlEscape(s: string) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-}
-
-function buildCaptionSVG(words: string[], highlights: Set<string>): string {
-  const boxH = 230
-  const boxY = VID_H - boxH - 130
-  const ty = boxY + 162
-  const totalChars = words.join(' ').length
-  const fontSize = Math.max(60, Math.min(92, Math.floor(900 / Math.max(totalChars, 8))))
-  const charW = fontSize * 0.62
-  const spaceW = fontSize * 0.34
-  const wordWidths = words.map((w) => w.length * charW)
-  const totalW = wordWidths.reduce((s, w) => s + w, 0) + spaceW * (words.length - 1)
-  let x = Math.max(40, (VID_W - totalW) / 2)
-  const strokes: string[] = []
-  const fills: string[] = []
-  words.forEach((word, i) => {
-    const clean = word.replace(/[.,!?'"]/g, '').toLowerCase()
-    const color = highlights.has(clean) ? '#FF3333' : 'white'
-    const wx = x + wordWidths[i] / 2
-    strokes.push(`<text x="${wx.toFixed(1)}" y="${ty}" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="${fontSize}" font-weight="900" fill="none" stroke="#000" stroke-width="10" stroke-linejoin="round">${xmlEscape(word)}</text>`)
-    fills.push(`<text x="${wx.toFixed(1)}" y="${ty}" text-anchor="middle" font-family="Arial Black, Impact, sans-serif" font-size="${fontSize}" font-weight="900" fill="${color}">${xmlEscape(word)}</text>`)
-    x += wordWidths[i] + spaceW
+async function getBundle(): Promise<string> {
+  if (cachedBundlePath) return cachedBundlePath
+  console.log('Bundling Remotion composition...')
+  cachedBundlePath = await bundle({
+    entryPoint: resolve(process.cwd(), 'remotion/index.ts'),
   })
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${VID_W}" height="${VID_H}">
-  <rect x="30" y="${boxY}" width="${VID_W - 60}" height="${boxH}" rx="22" fill="#000000" opacity="0.65"/>
-  ${strokes.join('\n  ')}
-  ${fills.join('\n  ')}
-</svg>`
+  console.log('Bundle ready:', cachedBundlePath)
+  return cachedBundlePath
 }
 
-// ─── Job processor ─────────────────────────────────────────────────────────────
+// ─── Types ─────────────────────────────────────────────────────────────────────
 
 interface VideoJob {
   id: string
@@ -90,7 +50,8 @@ interface VideoJob {
 }
 
 interface WordTiming { word: string; start: number; end: number }
-interface CaptionChunk { words: string[]; start: number; duration: number }
+
+// ─── Helpers ───────────────────────────────────────────────────────────────────
 
 async function downloadFile(url: string, dest: string): Promise<boolean> {
   try {
@@ -103,18 +64,17 @@ async function downloadFile(url: string, dest: string): Promise<boolean> {
   } catch { return false }
 }
 
+// ─── Job processor ─────────────────────────────────────────────────────────────
+
 async function processJob(job: VideoJob) {
-  const id = job.package_id
-  const audioPath   = join(TMP, `${id}.mp3`)
-  const bgPngPath   = join(TMP, `${id}_bg.png`)
-  const concatPath  = join(TMP, `${id}_captions.txt`)
-  const videoPath   = join(TMP, `${id}.mp4`)
-  const pngPaths: string[] = []
+  const id        = job.package_id
+  const audioPath = join(TMP, `${id}.mp3`)
+  const videoPath = join(TMP, `${id}.mp4`)
 
   console.log(`[job ${job.id}] starting for package ${id}`)
 
   try {
-    // 1. Download audio
+    // 1. Download audio (needed locally for duration detection)
     if (!await downloadFile(job.audio_url, audioPath)) throw new Error('Failed to download audio')
 
     // 2. Audio duration
@@ -123,8 +83,8 @@ async function processJob(job: VideoJob) {
     const duration = meta.format.duration
     if (!duration || isNaN(duration)) throw new Error('Could not determine audio duration')
 
-    // 3. Highlight words (non-fatal)
-    let highlights = new Set<string>()
+    // 3. Highlight words via Claude Haiku (non-fatal)
+    let highlightWords: string[] = []
     if (anthropic) {
       try {
         const hlRes = await anthropic.messages.create({
@@ -132,16 +92,12 @@ async function processJob(job: VideoJob) {
           messages: [{ role: 'user', content: `Pick 6-8 high-impact words from this TikTok script to highlight in red. Return ONLY a JSON array of lowercase words:\n\n${job.script}` }],
         })
         const raw = hlRes.content[0].type === 'text' ? (hlRes.content[0] as { type: 'text'; text: string }).text : '[]'
-        const words: string[] = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
-        highlights = new Set(words.map(w => w.toLowerCase()))
+        highlightWords = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
       } catch { /* non-fatal */ }
     }
 
-    // 4. Background — Pexels photo or solid color
-    let bgArg: string[] = ['-f', 'lavfi', '-i', `color=c=0x0e0820:size=${VID_W}x${VID_H}:rate=30`]
-    let bgFilter: string = '[0:v]null[bg]'
-    let usedBgFile = false
-
+    // 4. Pexels background image URL (no download needed — Remotion fetches directly)
+    let bgImageUrl: string | null = null
     if (PEXELS_KEY) {
       try {
         const topic = job.script.split(/\s+/).slice(0, 5).join(' ')
@@ -151,87 +107,77 @@ async function processJob(job: VideoJob) {
         )
         if (res.ok) {
           const pdata = await res.json()
-          const photos = pdata.photos ?? []
+          const photos: Array<{ src?: { large2x?: string; large?: string; original?: string } }> = pdata.photos ?? []
           if (photos.length > 0) {
             const photo = photos[Math.floor(Math.random() * photos.length)]
-            const imgUrl = photo.src?.large2x ?? photo.src?.large ?? photo.src?.original
-            if (imgUrl) {
-              const { default: sharp } = await import('sharp')
-              const imgBuf = Buffer.from(await (await fetch(imgUrl)).arrayBuffer())
-              await sharp(imgBuf)
-                .resize(VID_W, VID_H, { fit: 'cover', position: 'center' })
-                .png()
-                .toFile(bgPngPath)
-              bgArg = ['-loop', '1', '-i', bgPngPath]
-              bgFilter = '[0:v]scale=1080:1920[bg]'
-              usedBgFile = true
-            }
+            bgImageUrl = photo.src?.large2x ?? photo.src?.large ?? photo.src?.original ?? null
           }
         }
       } catch { /* fall through to solid color */ }
     }
 
-    if (!usedBgFile) {
-      bgArg = ['-f', 'lavfi', '-i', `color=c=0x0e0820:size=${VID_W}x${VID_H}:rate=30`]
-      bgFilter = '[0:v]null[bg]'
-    }
-
-    // 5. Caption chunks — try word timings from Supabase, fall back to even split
-    let captionChunks: CaptionChunk[]
+    // 5. Word timings → Remotion Caption[]
+    let captions: Caption[] = []
     try {
-      const { data: { publicUrl: timingsUrl } } = supabase.storage.from('voiceovers').getPublicUrl(`${id}_timestamps.json`)
+      const { data: { publicUrl: timingsUrl } } = supabase.storage
+        .from('voiceovers').getPublicUrl(`${id}_timestamps.json`)
       const timingsRes = await fetch(timingsUrl)
       if (!timingsRes.ok) throw new Error('no timings')
       const wordTimings: WordTiming[] = await timingsRes.json()
       if (!Array.isArray(wordTimings) || wordTimings.length === 0) throw new Error('empty timings')
-      const chunks: CaptionChunk[] = []
-      for (let i = 0; i < wordTimings.length; i += 3) {
-        const slice = wordTimings.slice(i, i + 3)
-        const next = wordTimings[i + 3]
-        const start = slice[0].start
-        const end = next?.start ?? slice[slice.length - 1].end
-        chunks.push({ words: slice.map(w => w.word), start, duration: Math.max(0.1, end - start) })
-      }
-      captionChunks = chunks
+      captions = wordTimings.map((w, i) => ({
+        text: (i === 0 ? '' : ' ') + w.word,
+        startMs: Math.round(w.start * 1000),
+        endMs: Math.round(w.end * 1000),
+        timestampMs: Math.round(w.start * 1000),
+        confidence: null,
+      }))
     } catch {
+      // Even-split fallback
       const words = job.script.split(/\s+/).filter(Boolean)
-      const chunkDur = duration / Math.ceil(words.length / 3)
-      captionChunks = []
-      for (let i = 0; i < words.length; i += 3) {
-        captionChunks.push({ words: words.slice(i, i + 3), start: 0, duration: chunkDur })
-      }
+      const wordDurMs = (duration * 1000) / words.length
+      captions = words.map((word, i) => ({
+        text: (i === 0 ? '' : ' ') + word,
+        startMs: Math.round(i * wordDurMs),
+        endMs: Math.round((i + 1) * wordDurMs),
+        timestampMs: Math.round(i * wordDurMs),
+        confidence: null,
+      }))
     }
 
-    // 6. Render caption PNGs
-    const { default: sharp } = await import('sharp')
-    for (let i = 0; i < captionChunks.length; i++) {
-      const p = join(TMP, `${id}_cap${i}.png`)
-      await sharp(Buffer.from(buildCaptionSVG(captionChunks[i].words, highlights))).png().toFile(p)
-      pngPaths.push(p)
+    // 6. Bundle Remotion composition (cached after first call)
+    const serveUrl = await getBundle()
+
+    // 7. Resolve browser executable
+    const browserExecutable = process.env.CI
+      ? '/usr/bin/google-chrome-stable'
+      : (await ensureBrowser()).executablePath
+
+    // 8. Render
+    const inputProps = {
+      audioUrl: job.audio_url,
+      captions,
+      highlightWords,
+      bgColor: '#0e0820',
+      bgImageUrl,
+      durationInSeconds: duration,
     }
 
-    // 7. Write concat file
-    const concatLines = ['ffconcat version 1.0']
-    for (let i = 0; i < captionChunks.length; i++) {
-      concatLines.push(`file '${pngPaths[i]}'`, `duration ${captionChunks[i].duration.toFixed(4)}`)
-    }
-    concatLines.push(`file '${pngPaths[pngPaths.length - 1]}'`)
-    writeFileSync(concatPath, concatLines.join('\n'), 'utf8')
+    const composition = await selectComposition({ serveUrl, id: 'TikTokVideo', inputProps })
 
-    // 8. Render video
-    ffmpeg([
-      '-y',
-      ...bgArg,
-      '-i', audioPath,
-      '-f', 'concat', '-safe', '0', '-i', concatPath,
-      '-filter_complex', `${bgFilter};[2:v]fps=30,format=rgba[cap];[bg][cap]overlay=0:0[vout]`,
-      '-map', '[vout]', '-map', '1:a',
-      '-t', String(duration),
-      '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
-      '-c:a', 'aac', '-b:a', '192k',
-      '-movflags', '+faststart',
-      videoPath,
-    ])
+    await renderMedia({
+      composition: { ...composition, durationInFrames: Math.ceil(duration * 30) },
+      serveUrl,
+      codec: 'h264',
+      outputLocation: videoPath,
+      inputProps,
+      browserExecutable,
+      onProgress: ({ progress }) => {
+        process.stdout.write(`\r[job ${job.id}] rendering ${Math.round(progress * 100)}%  `)
+      },
+    })
+    process.stdout.write('\n')
+    console.log(`[job ${job.id}] render complete`)
 
     // 9. Upload to Supabase Storage
     const videoBytes = readFileSync(videoPath)
@@ -261,15 +207,15 @@ async function processJob(job: VideoJob) {
       updated_at: new Date().toISOString(),
     }).eq('id', job.id)
   } finally {
-    for (const p of [audioPath, bgPngPath, concatPath, videoPath, ...pngPaths]) {
+    for (const p of [audioPath, videoPath]) {
       if (existsSync(p)) unlinkSync(p)
     }
   }
 }
 
 // ─── Entry point ───────────────────────────────────────────────────────────────
-// In GitHub Actions mode (CI=true): claim and process one job then exit.
-// In server mode (e.g. Railway): poll continuously.
+// CI mode (GitHub Actions): claim and process one job, then exit.
+// Server mode (Railway etc.): poll continuously.
 
 async function run() {
   mkdirSync(TMP, { recursive: true })
@@ -300,7 +246,6 @@ async function run() {
     return
   }
 
-  // Server mode: continuous poll
   console.log('Server mode: polling every', POLL_MS / 1000, 's...')
   while (true) {
     try {

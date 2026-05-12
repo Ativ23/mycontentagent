@@ -18,6 +18,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing packageId, script, or audioUrl' }, { status: 400 })
     }
 
+    // Reject obviously fake/test requests — packageId must be a real UUID
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    if (!UUID_RE.test(packageId)) {
+      return NextResponse.json({ error: 'Invalid packageId' }, { status: 400 })
+    }
+
     const supabase = getSupabaseAdmin()
     const { data: job, error } = await supabase
       .from('video_jobs')

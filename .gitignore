@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Claude Code / AI agent tools (local dev only, not needed in the public repo)
+.agents/
+skills-lock.json

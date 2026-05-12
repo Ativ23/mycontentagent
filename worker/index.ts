@@ -14,6 +14,7 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!
 const PEXELS_KEY   = process.env.PEXELS_API_KEY ?? ''
 const POLL_MS      = 5_000
 const TMP          = '/tmp/videoworker'
+const UUID_RE      = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY')
@@ -410,6 +411,11 @@ async function run() {
     }
 
     const job = jobs[0]
+    if (!UUID_RE.test(job.package_id)) {
+      console.log(`Skipping fake job ${job.id} (package_id='${job.package_id}')`)
+      await supabase.from('video_jobs').update({ status: 'failed', error: 'Invalid package_id', updated_at: new Date().toISOString() }).eq('id', job.id)
+      return
+    }
     const { error: claimErr } = await supabase
       .from('video_jobs')
       .update({ status: 'processing', updated_at: new Date().toISOString() })
@@ -429,6 +435,10 @@ async function run() {
 
       if (jobs && jobs.length > 0) {
         const job = jobs[0]
+        if (!UUID_RE.test(job.package_id)) {
+          await supabase.from('video_jobs').update({ status: 'failed', error: 'Invalid package_id', updated_at: new Date().toISOString() }).eq('id', job.id)
+          continue
+        }
         const { error: claimErr } = await supabase
           .from('video_jobs')
           .update({ status: 'processing', updated_at: new Date().toISOString() })

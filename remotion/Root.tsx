@@ -8,9 +8,10 @@ import type { TikTokVideoProps } from './TikTokVideo'
 // it lists every "template" the renderer knows about.
 export const RemotionRoot: React.FC = () => {
   return (
-    <Composition<TikTokVideoProps>
+    <Composition
       id="TikTokVideo"
-      component={TikTokVideo}
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      component={TikTokVideo as any}
       durationInFrames={900}   // Default 30s — overridden at render time
       fps={30}
       width={1080}

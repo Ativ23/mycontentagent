@@ -324,10 +324,8 @@ async function processJob(job: VideoJob) {
     console.log('[6/7] Bundling Remotion composition...')
     const serveUrl = await getBundle()
 
-    if (!process.env.CI) await ensureBrowser()
-    const browserExecutable: string | null = process.env.CI
-      ? '/usr/bin/google-chrome-stable'
-      : null
+    await ensureBrowser()
+    const browserExecutable: string | null = null
 
     const inputProps = {
       audioUrl: job.audio_url,

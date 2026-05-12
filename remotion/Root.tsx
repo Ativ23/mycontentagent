@@ -3,12 +3,15 @@ import { Composition } from 'remotion'
 import { TikTokVideo } from './TikTokVideo'
 import type { TikTokVideoProps } from './TikTokVideo'
 
+// RemotionRoot registers all video compositions.
+// Think of this like a project file in video editing software —
+// it lists every "template" the renderer knows about.
 export const RemotionRoot: React.FC = () => {
   return (
     <Composition
       id="TikTokVideo"
       component={TikTokVideo}
-      durationInFrames={900}
+      durationInFrames={900}   // Default 30s — overridden at render time
       fps={30}
       width={1080}
       height={1920}
@@ -16,8 +19,8 @@ export const RemotionRoot: React.FC = () => {
         audioUrl: '',
         captions: [],
         highlightWords: [],
+        scenes: [],            // Worker fills this with per-scene video data
         bgColor: '#0e0820',
-        bgImageUrl: null,
         durationInSeconds: 30,
       } satisfies TikTokVideoProps}
     />

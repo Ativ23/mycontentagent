@@ -84,6 +84,24 @@ export async function POST(req: NextRequest) {
   }
 }
 
+// Voice settings tuned per niche.
+// stability: 0 = expressive/varied, 1 = consistent/flat
+// style: 0 = neutral, 1 = maximum character/emotion
+// similarity_boost: how closely to stick to the voice's original character
+const NICHE_VOICE_SETTINGS: Record<string, { stability: number; similarity_boost: number; style: number }> = {
+  'Fitness & Health':   { stability: 0.30, similarity_boost: 0.85, style: 0.75 }, // aggressive, punchy, high energy
+  'Personal Finance':   { stability: 0.70, similarity_boost: 0.85, style: 0.25 }, // calm, authoritative, trustworthy
+  'Tech & Gadgets':     { stability: 0.55, similarity_boost: 0.80, style: 0.45 }, // sharp, curious, informative
+  'Beauty & Skincare':  { stability: 0.60, similarity_boost: 0.80, style: 0.50 }, // warm, friendly, smooth
+  'Fashion & Style':    { stability: 0.40, similarity_boost: 0.85, style: 0.65 }, // vibrant, confident, trendy
+  'Food & Recipes':     { stability: 0.50, similarity_boost: 0.80, style: 0.55 }, // enthusiastic, appetizing
+  'Relationships':      { stability: 0.45, similarity_boost: 0.85, style: 0.60 }, // emotional, relatable, warm
+  'Home & Kitchen':     { stability: 0.60, similarity_boost: 0.80, style: 0.40 }, // helpful, clear, friendly
+  'Pet Content':        { stability: 0.50, similarity_boost: 0.80, style: 0.60 }, // excited, warm, playful
+  'Digital Products':   { stability: 0.65, similarity_boost: 0.80, style: 0.35 }, // confident, results-focused
+}
+const DEFAULT_VOICE_SETTINGS = { stability: 0.50, similarity_boost: 0.75, style: 0.45 }
+
 async function handleVoiceover(req: NextRequest) {
   const { packageId, script, voiceId } = await req.json()
 
@@ -113,6 +131,18 @@ async function handleVoiceover(req: NextRequest) {
     return NextResponse.json({ error: 'No voice available. Set ELEVENLABS_VOICE_ID in .env.local.' }, { status: 500 })
   }
 
+  // Look up the niche from content_packages so we can tune voice settings.
+  // The frontend doesn't pass niche directly — we fetch it from the database.
+  const supabase = getSupabaseAdmin()
+  let niche = ''
+  try {
+    const { data: pkg } = await supabase
+      .from('content_packages').select('niche').eq('id', packageId).single()
+    niche = pkg?.niche ?? ''
+  } catch { /* non-fatal */ }
+
+  const voiceSettings = NICHE_VOICE_SETTINGS[niche] ?? DEFAULT_VOICE_SETTINGS
+
   let elevenRes: Response
   try {
     // /with-timestamps returns JSON: { audio_base64, alignment: { characters, character_start_times_seconds, character_end_times_seconds } }
@@ -125,7 +155,7 @@ async function handleVoiceover(req: NextRequest) {
       body: JSON.stringify({
         text: prepareForTTS(script),
         model_id: 'eleven_turbo_v2_5',
-        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+        voice_settings: voiceSettings,
       }),
     })
   } catch {
@@ -155,7 +185,6 @@ async function handleVoiceover(req: NextRequest) {
     ttsData.alignment.character_end_times_seconds,
   )
 
-  const supabase = getSupabaseAdmin()
   const audioFileName = `${packageId}.mp3`
   const timingsFileName = `${packageId}_timestamps.json`
 

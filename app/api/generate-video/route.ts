@@ -38,6 +38,22 @@ export async function POST(req: NextRequest) {
 
     if (error) throw new Error(`Failed to queue job: ${error.message}`)
 
+    // Immediately kick off the GitHub Actions worker so the user doesn't
+    // wait for the unreliable scheduled cron (which GitHub fires every few hours,
+    // not every minute as configured). Fire-and-forget — we don't block on it.
+    const ghToken = process.env.GITHUB_DISPATCH_TOKEN
+    if (ghToken) {
+      fetch('https://api.github.com/repos/Ativ23/mycontentagent/actions/workflows/video-worker.yml/dispatches', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${ghToken}`,
+          Accept: 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ ref: 'main' }),
+      }).catch(() => { /* non-fatal — cron is the fallback */ })
+    }
+
     return NextResponse.json({ jobId: job.id, status: 'pending' })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to queue video job'

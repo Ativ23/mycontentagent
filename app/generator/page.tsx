@@ -63,6 +63,16 @@ function GeneratorInner() {
     improved: boolean
   } | null>(null)
 
+  // AI voice selection
+  const [voiceSelection, setVoiceSelection] = useState<{
+    selectedVoiceId: string
+    selectedVoiceName: string
+    reason: string
+    voiceSettings: { stability: number; similarity_boost: number; style: number; use_speaker_boost: boolean }
+  } | null>(null)
+  const [voiceSelecting, setVoiceSelecting] = useState(false)
+  const [showVoiceOverride, setShowVoiceOverride] = useState(false)
+
   useEffect(() => {
     fetch('/api/voices')
       .then((r) => r.json())
@@ -162,6 +172,8 @@ function GeneratorInner() {
     setVideoError('')
     setRefineError('')
     setEnhanceReport(null)
+    setVoiceSelection(null)
+    setShowVoiceOverride(false)
 
     try {
       const res = await fetch('/api/generate-package', {
@@ -227,10 +239,30 @@ function GeneratorInner() {
       if (!res.ok) throw new Error(data.error || `Server error (${res.status})`)
       setSaved(true)
       setSavedId(data.package?.id ?? null)
+      // Kick off voice selection in the background as soon as the package is saved
+      if (contentPackage?.script) runVoiceSelection(contentPackage.script)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to save package')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const runVoiceSelection = async (script: string) => {
+    setVoiceSelecting(true)
+    setVoiceSelection(null)
+    try {
+      const res = await fetch('/api/select-voice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ script, niche, tone }),
+      })
+      const data = await res.json()
+      setVoiceSelection(data)
+    } catch {
+      // Non-fatal — voiceover generation has its own fallback
+    } finally {
+      setVoiceSelecting(false)
     }
   }
 
@@ -242,7 +274,13 @@ function GeneratorInner() {
       const res = await fetch('/api/generate-voiceover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ packageId: savedId, script: contentPackage.script, voiceId: selectedVoiceId || undefined }),
+        body: JSON.stringify({
+          packageId: savedId,
+          script: contentPackage.script,
+          // Manual override beats AI pick; AI pick beats default
+          voiceId: selectedVoiceId || voiceSelection?.selectedVoiceId || undefined,
+          voiceSettings: !selectedVoiceId && voiceSelection ? voiceSelection.voiceSettings : undefined,
+        }),
       })
       const text = await res.text()
       let data: { error?: string; audioUrl?: string } = {}
@@ -523,6 +561,8 @@ function GeneratorInner() {
                 setVideoUrl(null)
                 setVideoError('')
                 setRefineError('')
+                setVoiceSelection(null)
+                setShowVoiceOverride(false)
               }}
               className="px-5 py-3 rounded-lg border border-[#2a2a3a] text-[#8884a8] hover:text-white hover:border-[#3a3a4a] transition-colors text-sm"
             >
@@ -533,40 +573,101 @@ function GeneratorInner() {
           {/* Voiceover */}
           {saved && savedId && !audioUrl && (
             <div className="mt-4 space-y-3">
-              {voices.length > 0 && (
-                <div>
-                  <label className="block text-xs text-[#8884a8] mb-1.5">Voice</label>
-                  <div className="flex gap-2">
-                    <select
-                      value={selectedVoiceId}
-                      onChange={(e) => setSelectedVoiceId(e.target.value)}
-                      className="flex-1 bg-[#1a1a24] border border-[#2a2a3a] rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-violet-600 appearance-none"
-                    >
-                      <option value="">Default voice</option>
-                      {voices.map((v) => (
-                        <option key={v.voice_id} value={v.voice_id}>
-                          {v.name}{v.category === 'cloned' ? ' ★' : ''}
-                        </option>
-                      ))}
-                    </select>
-                    {selectedVoiceId && voices.find((v) => v.voice_id === selectedVoiceId)?.preview_url && (
-                      <button
-                        onClick={() => {
-                          const url = voices.find((v) => v.voice_id === selectedVoiceId)?.preview_url
-                          if (url) new Audio(url).play()
-                        }}
-                        className="px-3 py-2 rounded-lg border border-[#2a2a3a] text-[#8884a8] hover:text-white hover:border-violet-600 text-xs transition-colors"
-                      >
-                        ▶ Preview
-                      </button>
-                    )}
-                  </div>
+
+              {/* AI voice selection card */}
+              {voiceSelecting && (
+                <div className="bg-[#0d0d14] border border-[#2a2a3a] rounded-xl p-4 flex items-center gap-3">
+                  <span className="inline-block w-3 h-3 border-2 border-violet-400/30 border-t-violet-400 rounded-full animate-spin flex-shrink-0" />
+                  <p className="text-[#8884a8] text-sm">Analyzing script to find best voice...</p>
                 </div>
               )}
+
+              {!voiceSelecting && voiceSelection && (
+                <div className="bg-[#0d0d14] border border-violet-600/40 rounded-xl p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-violet-400 uppercase tracking-wider font-medium mb-1">Voice Selected</p>
+                      <p className="text-white font-semibold">{voiceSelection.selectedVoiceName}</p>
+                      <p className="text-[#8884a8] text-xs mt-1 leading-relaxed">{voiceSelection.reason}</p>
+                    </div>
+                    <div className="flex gap-2 flex-shrink-0">
+                      {/* Preview button */}
+                      {voices.find(v => v.voice_id === voiceSelection.selectedVoiceId)?.preview_url && (
+                        <button
+                          onClick={() => {
+                            const url = voices.find(v => v.voice_id === voiceSelection.selectedVoiceId)?.preview_url
+                            if (url) new Audio(url).play()
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg border border-[#2a2a3a] text-[#8884a8] hover:text-white hover:border-violet-600 text-xs transition-colors"
+                        >
+                          ▶ Preview
+                        </button>
+                      )}
+                      {/* Re-run selection */}
+                      <button
+                        onClick={() => contentPackage && runVoiceSelection(contentPackage.script)}
+                        className="px-2.5 py-1.5 rounded-lg border border-[#2a2a3a] text-[#8884a8] hover:text-white hover:border-violet-600 text-xs transition-colors"
+                      >
+                        ↻ Retry
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Voice settings pills */}
+                  <div className="flex gap-2 flex-wrap">
+                    {[
+                      { label: 'Stability', value: voiceSelection.voiceSettings.stability },
+                      { label: 'Style', value: voiceSelection.voiceSettings.style },
+                      { label: 'Similarity', value: voiceSelection.voiceSettings.similarity_boost },
+                    ].map(({ label, value }) => (
+                      <span key={label} className="text-xs px-2 py-0.5 rounded-full bg-[#1a1a24] border border-[#2a2a3a] text-[#8884a8]">
+                        {label}: {value.toFixed(2)}
+                      </span>
+                    ))}
+                  </div>
+
+                  {/* Manual override toggle */}
+                  <button
+                    onClick={() => setShowVoiceOverride(v => !v)}
+                    className="text-xs text-[#555566] hover:text-[#8884a8] transition-colors"
+                  >
+                    {showVoiceOverride ? '▲ Hide override' : '▼ Change voice manually'}
+                  </button>
+
+                  {showVoiceOverride && voices.length > 0 && (
+                    <div className="flex gap-2 pt-1">
+                      <select
+                        value={selectedVoiceId}
+                        onChange={(e) => setSelectedVoiceId(e.target.value)}
+                        className="flex-1 bg-[#1a1a24] border border-[#2a2a3a] rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-violet-600 appearance-none"
+                      >
+                        <option value="">Use AI selection ({voiceSelection.selectedVoiceName})</option>
+                        {voices.map((v) => (
+                          <option key={v.voice_id} value={v.voice_id}>
+                            {v.name}{v.category === 'cloned' ? ' ★' : ''}
+                          </option>
+                        ))}
+                      </select>
+                      {selectedVoiceId && voices.find(v => v.voice_id === selectedVoiceId)?.preview_url && (
+                        <button
+                          onClick={() => {
+                            const url = voices.find(v => v.voice_id === selectedVoiceId)?.preview_url
+                            if (url) new Audio(url).play()
+                          }}
+                          className="px-3 py-2 rounded-lg border border-[#2a2a3a] text-[#8884a8] hover:text-white hover:border-violet-600 text-xs transition-colors"
+                        >
+                          ▶
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {voiceError && <p className="text-red-400 text-sm">{voiceError}</p>}
               <button
                 onClick={generateVoiceover}
-                disabled={voiceLoading}
+                disabled={voiceLoading || voiceSelecting}
                 className="w-full py-3 rounded-lg border border-violet-600 text-violet-300 hover:bg-violet-600/20 disabled:opacity-40 disabled:cursor-not-allowed font-medium transition-colors text-sm"
               >
                 {voiceLoading ? 'Generating voiceover...' : '▶ Generate Voiceover'}

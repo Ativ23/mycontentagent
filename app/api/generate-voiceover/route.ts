@@ -103,7 +103,12 @@ const NICHE_VOICE_SETTINGS: Record<string, { stability: number; similarity_boost
 const DEFAULT_VOICE_SETTINGS = { stability: 0.50, similarity_boost: 0.75, style: 0.45 }
 
 async function handleVoiceover(req: NextRequest) {
-  const { packageId, script, voiceId } = await req.json()
+  const { packageId, script, voiceId, voiceSettings: reqVoiceSettings } = await req.json() as {
+    packageId: string
+    script: string
+    voiceId?: string
+    voiceSettings?: { stability: number; similarity_boost: number; style: number; use_speaker_boost?: boolean }
+  }
 
   if (!packageId || !script) {
     return NextResponse.json({ error: 'Missing packageId or script' }, { status: 400 })
@@ -141,7 +146,8 @@ async function handleVoiceover(req: NextRequest) {
     niche = pkg?.niche ?? ''
   } catch { /* non-fatal */ }
 
-  const voiceSettings = NICHE_VOICE_SETTINGS[niche] ?? DEFAULT_VOICE_SETTINGS
+  // AI-selected settings from /api/select-voice take priority over niche defaults
+  const voiceSettings = reqVoiceSettings ?? NICHE_VOICE_SETTINGS[niche] ?? DEFAULT_VOICE_SETTINGS
 
   let elevenRes: Response
   try {

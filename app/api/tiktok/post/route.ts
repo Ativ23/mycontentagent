@@ -11,7 +11,6 @@ async function getValidAccessToken(): Promise<string | null> {
 
   if (error || !data) return null
 
-  // Return existing token if it has more than 5 minutes remaining
   if (new Date(data.expires_at).getTime() - Date.now() > 5 * 60 * 1000) {
     return data.access_token
   }
@@ -21,16 +20,23 @@ async function getValidAccessToken(): Promise<string | null> {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_key: process.env.TIKTOK_CLIENT_KEY!,
+      client_key:    process.env.TIKTOK_CLIENT_KEY!,
       client_secret: process.env.TIKTOK_CLIENT_SECRET!,
-      grant_type: 'refresh_token',
+      grant_type:    'refresh_token',
       refresh_token: data.refresh_token,
     }),
   })
 
-  if (!refreshRes.ok) return null
+  if (!refreshRes.ok) {
+    console.error('[tiktok/post] Token refresh failed:', await refreshRes.text())
+    return null
+  }
 
-  const refreshData = await refreshRes.json()
+  const refreshData = await refreshRes.json() as {
+    access_token?: string
+    refresh_token?: string
+    expires_in?: number
+  }
   const { access_token, refresh_token, expires_in } = refreshData
   if (!access_token) return null
 
@@ -44,39 +50,95 @@ async function getValidAccessToken(): Promise<string | null> {
 }
 
 export async function POST(req: NextRequest) {
-  const { videoUrl } = await req.json()
-
-  if (!videoUrl) {
-    return NextResponse.json({ error: 'Missing videoUrl' }, { status: 400 })
-  }
-
-  const accessToken = await getValidAccessToken()
-  if (!accessToken) {
-    return NextResponse.json(
-      { error: 'TikTok not connected. Connect your account in Settings first.' },
-      { status: 401 }
-    )
-  }
-
-  // Download video from Supabase storage
-  let videoArrayBuffer: ArrayBuffer
   try {
-    const videoRes = await fetch(videoUrl)
-    if (!videoRes.ok) throw new Error(`HTTP ${videoRes.status}`)
-    videoArrayBuffer = await videoRes.arrayBuffer()
-  } catch (e: unknown) {
+    const { videoUrl, caption } = await req.json() as { videoUrl: string; caption?: string }
+
+    if (!videoUrl) {
+      return NextResponse.json({ error: 'Missing videoUrl' }, { status: 400 })
+    }
+
+    // Verify the URL is a valid Supabase storage URL so we don't pull arbitrary URLs
+    if (!videoUrl.includes('supabase.co/storage')) {
+      return NextResponse.json({ error: 'videoUrl must be a Supabase storage URL' }, { status: 400 })
+    }
+
+    const accessToken = await getValidAccessToken()
+    if (!accessToken) {
+      return NextResponse.json(
+        { error: 'TikTok not connected. Connect your account in Settings.' },
+        { status: 401 }
+      )
+    }
+
+    // Use PULL_FROM_URL — TikTok fetches the video directly from Supabase.
+    // This avoids downloading the entire video into Vercel function memory (OOM risk).
+    const initRes = await fetch('https://open.tiktokapis.com/v2/post/publish/inbox/video/init/', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json; charset=UTF-8',
+      },
+      body: JSON.stringify({
+        source_info: {
+          source:    'PULL_FROM_URL',
+          video_url: videoUrl,
+        },
+      }),
+    })
+
+    if (!initRes.ok) {
+      const errText = await initRes.text()
+      console.error('[tiktok/post] Init failed:', errText)
+      // Fall back to FILE_UPLOAD path if PULL_FROM_URL is not supported on this account
+      if (initRes.status === 400 || initRes.status === 422) {
+        return await fileUploadFallback(accessToken, videoUrl)
+      }
+      return NextResponse.json({ error: `TikTok upload init failed: ${errText}` }, { status: 502 })
+    }
+
+    const initData = await initRes.json() as { error?: { code?: string; message?: string }; data?: { publish_id?: string } }
+    if (initData.error?.code && initData.error.code !== 'ok') {
+      // Try file upload fallback if pull not allowed
+      if (initData.error.code === 'access_token_invalid' || initData.error.code === 'spam_risk_too_many_requests') {
+        return NextResponse.json({ error: `TikTok error: ${initData.error.message}` }, { status: 429 })
+      }
+      return await fileUploadFallback(accessToken, videoUrl)
+    }
+
+    const publish_id = initData.data?.publish_id
+    console.log('[tiktok/post] Queued via PULL_FROM_URL, publish_id:', publish_id)
+    return NextResponse.json({ success: true, publish_id, method: 'pull' })
+
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'TikTok post failed'
+    console.error('[tiktok/post] Unexpected error:', msg)
+    return NextResponse.json({ error: msg }, { status: 500 })
+  }
+}
+
+// FILE_UPLOAD fallback — only used if PULL_FROM_URL is rejected.
+// Downloads the video and streams it to TikTok's CDN.
+// Guarded by a size check to avoid OOM on large files.
+async function fileUploadFallback(accessToken: string, videoUrl: string): Promise<Response> {
+  const MAX_BYTES = 60 * 1024 * 1024 // 60 MB hard limit
+
+  // HEAD check first so we know the size without downloading
+  const head = await fetch(videoUrl, { method: 'HEAD' })
+  const contentLength = Number(head.headers.get('content-length') ?? 0)
+  if (contentLength > MAX_BYTES) {
     return NextResponse.json(
-      { error: `Failed to download video: ${e instanceof Error ? e.message : 'unknown'}` },
-      { status: 500 }
+      { error: `Video is ${Math.round(contentLength / 1024 / 1024)}MB — too large for direct upload. Max 60MB.` },
+      { status: 413 }
     )
   }
 
+  const videoRes = await fetch(videoUrl)
+  if (!videoRes.ok) {
+    return NextResponse.json({ error: `Failed to download video: HTTP ${videoRes.status}` }, { status: 500 })
+  }
+  const videoArrayBuffer = await videoRes.arrayBuffer()
   const videoSize = videoArrayBuffer.byteLength
-  // TikTok max chunk size is 64MB; use a single chunk for typical TikTok videos (<100MB)
-  const chunkSize = videoSize
-  const totalChunkCount = 1
 
-  // Step 1: Initialize the inbox upload
   const initRes = await fetch('https://open.tiktokapis.com/v2/post/publish/inbox/video/init/', {
     method: 'POST',
     headers: {
@@ -84,32 +146,25 @@ export async function POST(req: NextRequest) {
       'Content-Type': 'application/json; charset=UTF-8',
     },
     body: JSON.stringify({
-      source_info: {
-        source: 'FILE_UPLOAD',
-        video_size: videoSize,
-        chunk_size: chunkSize,
-        total_chunk_count: totalChunkCount,
-      },
+      source_info: { source: 'FILE_UPLOAD', video_size: videoSize, chunk_size: videoSize, total_chunk_count: 1 },
     }),
   })
 
   if (!initRes.ok) {
-    const errText = await initRes.text()
-    console.error('[tiktok/post] Init failed:', errText)
-    return NextResponse.json({ error: `TikTok upload init failed: ${errText}` }, { status: 502 })
+    const t = await initRes.text()
+    return NextResponse.json({ error: `TikTok FILE_UPLOAD init failed: ${t}` }, { status: 502 })
   }
 
-  const initData = await initRes.json()
-  if (initData.error?.code !== 'ok') {
-    return NextResponse.json(
-      { error: `TikTok init error: ${initData.error?.message ?? 'unknown'}` },
-      { status: 502 }
-    )
+  const initData = await initRes.json() as { error?: { code?: string; message?: string }; data?: { publish_id?: string; upload_url?: string } }
+  if (initData.error?.code && initData.error.code !== 'ok') {
+    return NextResponse.json({ error: `TikTok error: ${initData.error.message}` }, { status: 502 })
   }
 
-  const { publish_id, upload_url } = initData.data
+  const { publish_id, upload_url } = initData.data ?? {}
+  if (!upload_url) {
+    return NextResponse.json({ error: 'TikTok did not return upload_url' }, { status: 502 })
+  }
 
-  // Step 2: Upload the video as a single chunk
   const uploadRes = await fetch(upload_url, {
     method: 'PUT',
     headers: {
@@ -122,12 +177,9 @@ export async function POST(req: NextRequest) {
 
   if (!uploadRes.ok) {
     const errText = await uploadRes.text()
-    console.error('[tiktok/post] Upload failed:', uploadRes.status, errText)
-    return NextResponse.json(
-      { error: `Video upload failed (${uploadRes.status}): ${errText}` },
-      { status: 502 }
-    )
+    return NextResponse.json({ error: `Video chunk upload failed (${uploadRes.status}): ${errText}` }, { status: 502 })
   }
 
-  return NextResponse.json({ success: true, publish_id })
+  console.log('[tiktok/post] Uploaded via FILE_UPLOAD fallback, publish_id:', publish_id)
+  return NextResponse.json({ success: true, publish_id, method: 'upload' })
 }

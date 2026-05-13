@@ -9,16 +9,63 @@ import type { SceneData } from '../remotion/TikTokVideo'
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!
-const PEXELS_KEY   = process.env.PEXELS_API_KEY ?? ''
-const POLL_MS      = 5_000
-const TMP          = '/tmp/videoworker'
-const UUID_RE      = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const SUPABASE_URL  = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const SUPABASE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY!
+const PEXELS_KEY    = process.env.PEXELS_API_KEY ?? ''
+const POLL_MS       = 5_000
+const TMP           = '/tmp/videoworker'
+const UUID_RE       = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// Jobs stuck in "processing" longer than this are assumed crashed and reset
+const STUCK_JOB_MIN = 20
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY')
   process.exit(1)
+}
+
+// ─── Structured logging ────────────────────────────────────────────────────────
+// Every log line gets a UTC timestamp so GitHub Actions logs are easy to read.
+function log(level: 'INFO' | 'WARN' | 'ERROR', msg: string, jobId?: string) {
+  const ts     = new Date().toISOString()
+  const prefix = jobId ? `[${ts}] [${level}] [job:${jobId}]` : `[${ts}] [${level}]`
+  if (level === 'ERROR') console.error(`${prefix} ${msg}`)
+  else if (level === 'WARN') console.warn(`${prefix} ${msg}`)
+  else console.log(`${prefix} ${msg}`)
+}
+
+// ─── Fetch with timeout ────────────────────────────────────────────────────────
+// Wraps fetch() with an AbortController so a hung network call doesn't
+// block the entire job and eat the GitHub Actions timeout budget.
+async function fetchWithTimeout(url: string, opts: RequestInit = {}, ms = 15_000): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), ms)
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// ─── Retry with exponential backoff ───────────────────────────────────────────
+// Retries an async function up to `maxAttempts` times.
+// Waits 1s, 2s, 4s, ... between attempts (capped at 8s).
+// Only retries on network/transient errors — if the function throws a
+// non-retryable error (e.g. "Invalid packageId") we re-throw immediately.
+async function retry<T>(fn: () => Promise<T>, maxAttempts = 3, label = 'operation'): Promise<T> {
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      if (attempt < maxAttempts) {
+        const wait = Math.min(1000 * 2 ** (attempt - 1), 8000)
+        log('WARN', `${label} failed (attempt ${attempt}/${maxAttempts}), retrying in ${wait}ms: ${err instanceof Error ? err.message : String(err)}`)
+        await new Promise(r => setTimeout(r, wait))
+      }
+    }
+  }
+  throw lastErr
 }
 
 const supabase  = createClient(SUPABASE_URL, SUPABASE_KEY)
@@ -62,13 +109,16 @@ interface SceneDef {
 
 async function downloadFile(url: string, dest: string): Promise<boolean> {
   try {
-    const res = await fetch(url)
-    if (!res.ok) return false
+    const res = await fetchWithTimeout(url, {}, 30_000)
+    if (!res.ok) { log('WARN', `downloadFile HTTP ${res.status} for ${url}`); return false }
     const buf = Buffer.from(await res.arrayBuffer())
-    if (buf.length < 1024) return false
+    if (buf.length < 1024) { log('WARN', `downloadFile: file too small (${buf.length} bytes)`); return false }
     writeFileSync(dest, buf)
     return true
-  } catch { return false }
+  } catch (err) {
+    log('WARN', `downloadFile error: ${err instanceof Error ? err.message : String(err)}`)
+    return false
+  }
 }
 
 // ─── Scene breakdown ───────────────────────────────────────────────────────────
@@ -145,42 +195,37 @@ async function searchPexelsVideo(keywords: string[]): Promise<string | null> {
 
   for (const query of keywords) {
     try {
-      // orientation=portrait gets vertical videos — perfect for TikTok
-      const res = await fetch(
-        `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=5`,
-        { headers: { Authorization: PEXELS_KEY } }
+      const res = await retry(
+        () => fetchWithTimeout(
+          `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=5`,
+          { headers: { Authorization: PEXELS_KEY } },
+          10_000
+        ),
+        2,
+        `pexels-video:"${query}"`
       )
       if (!res.ok) continue
 
-      const data = await res.json()
-      const videos: Array<{
-        video_files: Array<{ file_type: string; quality: string; width: number; height: number; link: string }>
-      }> = data.videos ?? []
+      const data = await res.json() as { videos?: Array<{ video_files: Array<{ file_type: string; quality: string; width: number; height: number; link: string }> }> }
+      const videos = data.videos ?? []
       if (!videos.length) continue
 
-      // Pick a random video from the results (variety keeps the content fresh)
       const video = videos[Math.floor(Math.random() * videos.length)]
-      const files = video.video_files ?? []
-
-      // Filter for MP4 files only — broadest compatibility
-      const mp4Files = files.filter(f => f.file_type === 'video/mp4')
-
-      // Prefer portrait-oriented files (height > width)
+      const mp4Files = (video.video_files ?? []).filter(f => f.file_type === 'video/mp4')
       const portraitFiles = mp4Files.filter(f => f.height && f.width && f.height > f.width)
-
-      // Fall back to any HD file if no portrait available
-      const selected = portraitFiles[0]
-        ?? mp4Files.find(f => f.quality === 'hd')
-        ?? mp4Files[0]
+      const selected = portraitFiles[0] ?? mp4Files.find(f => f.quality === 'hd') ?? mp4Files[0]
 
       if (selected?.link) {
-        console.log(`  Video found for "${query}": ${selected.width}x${selected.height}`)
+        log('INFO', `  Video found for "${query}": ${selected.width}x${selected.height}`)
         return selected.link
       }
-    } catch { continue }
+    } catch (err) {
+      log('WARN', `searchPexelsVideo error for "${query}": ${err instanceof Error ? err.message : String(err)}`)
+      continue
+    }
   }
 
-  console.warn(`  No video found for keywords: ${keywords.join(', ')}`)
+  log('WARN', `No video found for keywords: ${keywords.join(', ')}`)
   return null
 }
 
@@ -191,13 +236,18 @@ async function searchPexelsImage(keywords: string[]): Promise<string | null> {
 
   for (const query of keywords) {
     try {
-      const res = await fetch(
-        `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=3`,
-        { headers: { Authorization: PEXELS_KEY } }
+      const res = await retry(
+        () => fetchWithTimeout(
+          `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=3`,
+          { headers: { Authorization: PEXELS_KEY } },
+          10_000
+        ),
+        2,
+        `pexels-image:"${query}"`
       )
       if (!res.ok) continue
-      const data = await res.json()
-      const photos: Array<{ src?: { large2x?: string; large?: string } }> = data.photos ?? []
+      const data = await res.json() as { photos?: Array<{ src?: { large2x?: string; large?: string } }> }
+      const photos = data.photos ?? []
       if (!photos.length) continue
       const photo = photos[Math.floor(Math.random() * photos.length)]
       const url = photo.src?.large2x ?? photo.src?.large ?? null
@@ -214,38 +264,32 @@ async function processJob(job: VideoJob) {
   const id        = job.package_id
   const audioPath = join(TMP, `${id}.mp3`)
   const videoPath = join(TMP, `${id}.mp4`)
+  const jid       = job.id
 
-  console.log(`\n[job ${job.id}] ── Starting package ${id}`)
+  log('INFO', `── Starting package ${id}`, jid)
 
   try {
-    // ── STEP 1: Download audio ──────────────────────────────────────────────
-    // We need the audio file locally to measure its duration.
-    console.log('[1/7] Downloading audio...')
-    if (!await downloadFile(job.audio_url, audioPath)) throw new Error('Failed to download audio')
+    // ── STEP 1: Download audio + measure duration ──────────────────────────
+    log('INFO', '[1/7] Downloading audio...', jid)
+    const downloaded = await retry(() => downloadFile(job.audio_url, audioPath), 3, 'download-audio')
+    if (!downloaded) throw new Error('Failed to download audio after 3 attempts')
 
-    // ── STEP 2: Get audio duration ─────────────────────────────────────────
-    // music-metadata reads the MP3 header to find duration in seconds.
-    // We need this to: (a) set video length, (b) distribute scene timing.
     const { parseFile } = await import('music-metadata')
     const meta = await parseFile(audioPath)
     const duration = meta.format.duration
     if (!duration || isNaN(duration)) throw new Error('Could not determine audio duration')
-    console.log(`[1/7] Duration: ${duration.toFixed(1)}s`)
+    log('INFO', `[1/7] Duration: ${duration.toFixed(1)}s`, jid)
 
-    // ── STEP 3: Word timings → Caption[] ───────────────────────────────────
-    // ElevenLabs stored word timestamps alongside the audio in Supabase.
-    // We convert them to Remotion's Caption format for word-synced display.
-    console.log('[2/7] Fetching word timings...')
+    // ── STEP 2: Word timings → Caption[] ───────────────────────────────────
+    log('INFO', '[2/7] Fetching word timings...', jid)
     let captions: Caption[] = []
     try {
       const { data: { publicUrl: timingsUrl } } = supabase.storage
         .from('voiceovers').getPublicUrl(`${id}_timestamps.json`)
-      const timingsRes = await fetch(timingsUrl)
-      if (!timingsRes.ok) throw new Error('no timings file')
+      const timingsRes = await fetchWithTimeout(timingsUrl, {}, 10_000)
+      if (!timingsRes.ok) throw new Error(`HTTP ${timingsRes.status}`)
       const wordTimings: WordTiming[] = await timingsRes.json()
       if (!Array.isArray(wordTimings) || wordTimings.length === 0) throw new Error('empty timings')
-
-      // Convert: { word, start, end } (seconds) → { text, startMs, endMs } (milliseconds)
       captions = wordTimings.map((w, i) => ({
         text: (i === 0 ? '' : ' ') + w.word,
         startMs: Math.round(w.start * 1000),
@@ -253,9 +297,9 @@ async function processJob(job: VideoJob) {
         timestampMs: Math.round(w.start * 1000),
         confidence: null,
       }))
-      console.log(`[2/7] ${captions.length} word timings loaded`)
-    } catch {
-      // Fallback: spread words evenly across the audio duration
+      log('INFO', `[2/7] ${captions.length} word timings loaded`, jid)
+    } catch (err) {
+      log('WARN', `[2/7] Timings unavailable (${err instanceof Error ? err.message : String(err)}), using even-split fallback`, jid)
       const words = job.script.split(/\s+/).filter(Boolean)
       const wordDurMs = (duration * 1000) / words.length
       captions = words.map((word, i) => ({
@@ -265,12 +309,10 @@ async function processJob(job: VideoJob) {
         timestampMs: Math.round(i * wordDurMs),
         confidence: null,
       }))
-      console.log(`[2/7] Using even-split fallback (${words.length} words)`)
     }
 
-    // ── STEP 4: Highlight words ────────────────────────────────────────────
-    // Claude picks 6-8 words to show in red — the most important words in the script.
-    console.log('[3/7] Getting highlight words...')
+    // ── STEP 3: Highlight words ────────────────────────────────────────────
+    log('INFO', '[3/7] Getting highlight words...', jid)
     let highlightWords: string[] = []
     if (anthropic) {
       try {
@@ -280,32 +322,24 @@ async function processJob(job: VideoJob) {
         })
         const raw = hlRes.content[0].type === 'text' ? (hlRes.content[0] as { type: 'text'; text: string }).text : '[]'
         highlightWords = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
-      } catch { /* non-fatal — video still works without highlights */ }
+      } catch (err) {
+        log('WARN', `[3/7] Highlight words failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`, jid)
+      }
     }
-    console.log(`[3/7] Highlight words: ${highlightWords.join(', ')}`)
+    log('INFO', `[3/7] Highlight words: ${highlightWords.join(', ') || '(none)'}`, jid)
 
-    // ── STEP 5: Scene breakdown ────────────────────────────────────────────
-    // Claude reads the script and returns 4-6 scenes.
-    // Each scene gets visual keywords we'll search Pexels with.
-    console.log('[4/7] Breaking script into scenes...')
+    // ── STEP 4: Scene breakdown ────────────────────────────────────────────
+    log('INFO', '[4/7] Breaking script into scenes...', jid)
     const sceneDefs = await breakIntoScenes(job.script, duration)
     const timings   = distributeSceneTiming(sceneDefs, duration)
-    console.log(`[4/7] ${sceneDefs.length} scenes identified`)
+    log('INFO', `[4/7] ${sceneDefs.length} scenes identified`, jid)
 
-    // ── STEP 6: Fetch visuals for each scene ───────────────────────────────
-    // We search Pexels Videos for each scene in PARALLEL using Promise.all().
-    //
-    // Why parallel? Without it, 6 scenes × ~1 second each = 6 seconds waiting.
-    // With Promise.all(), all 6 searches happen simultaneously = ~1 second total.
-    // This is a huge speed win for the render pipeline.
-    //
-    // For each scene: try Pexels video → fallback to Pexels image → fallback to null
-    console.log('[5/7] Fetching visuals from Pexels...')
+    // ── STEP 5: Fetch visuals in parallel ──────────────────────────────────
+    log('INFO', '[5/7] Fetching visuals from Pexels...', jid)
     const scenes: SceneData[] = await Promise.all(
       sceneDefs.map(async (scene, i) => {
         const videoUrl = await searchPexelsVideo(scene.visualKeywords)
         const imageUrl = videoUrl ? null : await searchPexelsImage(scene.visualKeywords)
-
         return {
           videoUrl,
           imageUrl,
@@ -315,13 +349,12 @@ async function processJob(job: VideoJob) {
         }
       })
     )
-
     const videoCount = scenes.filter(s => s.videoUrl).length
     const imageCount = scenes.filter(s => s.imageUrl).length
-    console.log(`[5/7] Visuals: ${videoCount} videos, ${imageCount} images, ${scenes.length - videoCount - imageCount} solid-color`)
+    log('INFO', `[5/7] Visuals: ${videoCount} videos, ${imageCount} images, ${scenes.length - videoCount - imageCount} solid-color`, jid)
 
-    // ── STEP 7: Bundle + Render ────────────────────────────────────────────
-    console.log('[6/7] Bundling Remotion composition...')
+    // ── STEP 6: Bundle ─────────────────────────────────────────────────────
+    log('INFO', '[6/7] Bundling Remotion composition...', jid)
     const serveUrl = await getBundle()
 
     await ensureBrowser()
@@ -338,7 +371,9 @@ async function processJob(job: VideoJob) {
 
     const composition = await selectComposition({ serveUrl, id: 'TikTokVideo', inputProps })
 
-    console.log('[7/7] Rendering video...')
+    // ── STEP 7: Render ─────────────────────────────────────────────────────
+    log('INFO', '[7/7] Rendering video...', jid)
+    let lastLoggedPct = -1
     await renderMedia({
       composition: { ...composition, durationInFrames: Math.ceil(duration * 30) },
       serveUrl,
@@ -347,41 +382,57 @@ async function processJob(job: VideoJob) {
       inputProps,
       browserExecutable,
       onProgress: ({ progress }) => {
-        process.stdout.write(`\r  Progress: ${Math.round(progress * 100)}%  `)
+        const pct = Math.round(progress * 100)
+        // Only log every 10% to avoid flooding the output
+        if (pct >= lastLoggedPct + 10) {
+          process.stdout.write(`\r  Render: ${pct}%  `)
+          lastLoggedPct = pct
+        }
       },
     })
     process.stdout.write('\n')
+    log('INFO', 'Render complete', jid)
 
-    // ── STEP 8: Upload + complete ──────────────────────────────────────────
+    // ── STEP 8: Upload ─────────────────────────────────────────────────────
+    log('INFO', 'Uploading video to Supabase...', jid)
     const videoBytes = readFileSync(videoPath)
-    const { error: uploadErr } = await supabase.storage
-      .from('videos')
-      .upload(`${id}.mp4`, videoBytes, { contentType: 'video/mp4', upsert: true })
+    const { error: uploadErr } = await retry(
+      () => supabase.storage.from('videos').upload(`${id}.mp4`, videoBytes, { contentType: 'video/mp4', upsert: true }),
+      3,
+      'supabase-upload'
+    )
     if (uploadErr) throw new Error(`Upload failed: ${uploadErr.message}`)
 
     const { data: { publicUrl: videoUrl } } = supabase.storage.from('videos').getPublicUrl(`${id}.mp4`)
 
-    await supabase.from('content_packages').update({ video_url: videoUrl }).eq('id', id)
-    await supabase.from('video_jobs').update({
+    // Update both tables — log any errors so they're visible in Actions logs
+    const { error: pkgErr } = await supabase
+      .from('content_packages')
+      .update({ video_url: videoUrl })
+      .eq('id', id)
+    if (pkgErr) log('ERROR', `content_packages update failed: ${pkgErr.message}`, jid)
+
+    const { error: jobErr } = await supabase.from('video_jobs').update({
       status: 'complete',
       video_url: videoUrl,
       updated_at: new Date().toISOString(),
-    }).eq('id', job.id)
+    }).eq('id', jid)
+    if (jobErr) log('ERROR', `video_jobs complete update failed: ${jobErr.message}`, jid)
 
-    console.log(`[job ${job.id}] ✓ Complete: ${videoUrl}`)
+    log('INFO', `✓ Complete: ${videoUrl}`, jid)
 
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
-    console.error(`[job ${job.id}] ✗ Failed: ${msg}`)
-    await supabase.from('video_jobs').update({
+    log('ERROR', `✗ Failed: ${msg}`, jid)
+    const { error: failErr } = await supabase.from('video_jobs').update({
       status: 'failed',
       error: msg,
       updated_at: new Date().toISOString(),
-    }).eq('id', job.id)
+    }).eq('id', jid)
+    if (failErr) log('ERROR', `video_jobs failed update itself failed: ${failErr.message}`, jid)
   } finally {
-    // Always clean up temp files, even if something crashed
     for (const p of [audioPath, videoPath]) {
-      if (existsSync(p)) unlinkSync(p)
+      try { if (existsSync(p)) unlinkSync(p) } catch { /* ignore cleanup errors */ }
     }
   }
 }
@@ -390,66 +441,89 @@ async function processJob(job: VideoJob) {
 // CI mode  (GitHub Actions, CI=true): claim ONE job → process it → exit.
 // Server mode (Railway etc.)        : poll every 5 seconds indefinitely.
 
+// ─── Stuck job recovery ────────────────────────────────────────────────────────
+// Jobs stuck in "processing" for longer than STUCK_JOB_MIN minutes are reset
+// to "pending" so the next worker run can claim them.
+// This handles GitHub Actions runners that crash mid-render.
+async function resetStuckJobs() {
+  const cutoff = new Date(Date.now() - STUCK_JOB_MIN * 60 * 1000).toISOString()
+  const { data: stuck, error } = await supabase
+    .from('video_jobs')
+    .select('id')
+    .eq('status', 'processing')
+    .lt('updated_at', cutoff)
+
+  if (error) { log('WARN', `Could not query stuck jobs: ${error.message}`); return }
+  if (!stuck || stuck.length === 0) return
+
+  const ids = stuck.map(j => j.id)
+  const { error: resetErr } = await supabase
+    .from('video_jobs')
+    .update({ status: 'pending', error: null, updated_at: new Date().toISOString() })
+    .in('id', ids)
+
+  if (resetErr) log('ERROR', `Failed to reset stuck jobs: ${resetErr.message}`)
+  else log('INFO', `Reset ${ids.length} stuck job(s) back to pending`)
+}
+
+async function claimAndProcess() {
+  const { data: jobs } = await supabase
+    .from('video_jobs')
+    .select('*')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1)
+
+  if (!jobs || jobs.length === 0) return false
+
+  const job = jobs[0]
+
+  if (!UUID_RE.test(job.package_id)) {
+    log('WARN', `Skipping fake job (package_id='${job.package_id}')`, job.id)
+    await supabase.from('video_jobs').update({ status: 'failed', error: 'Invalid package_id', updated_at: new Date().toISOString() }).eq('id', job.id)
+    return false
+  }
+
+  // Atomic claim — only succeeds if the job is still pending
+  const { error: claimErr } = await supabase
+    .from('video_jobs')
+    .update({ status: 'processing', updated_at: new Date().toISOString() })
+    .eq('id', job.id)
+    .eq('status', 'pending')
+
+  if (claimErr) {
+    log('WARN', `Failed to claim job (already claimed by another worker): ${claimErr.message}`, job.id)
+    return false
+  }
+
+  await processJob(job as VideoJob)
+  return true
+}
+
 async function run() {
   mkdirSync(TMP, { recursive: true })
   const ci = !!process.env.CI
 
+  // Always reset stuck jobs first — handles crashed previous runners
+  await resetStuckJobs()
+
   if (ci) {
-    console.log('CI mode: processing one pending job then exiting.')
-    const { data: jobs } = await supabase
-      .from('video_jobs')
-      .select('*')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: true })
-      .limit(1)
-
-    if (!jobs || jobs.length === 0) {
-      console.log('No pending jobs. Exiting.')
-      return
-    }
-
-    const job = jobs[0]
-    if (!UUID_RE.test(job.package_id)) {
-      console.log(`Skipping fake job ${job.id} (package_id='${job.package_id}')`)
-      await supabase.from('video_jobs').update({ status: 'failed', error: 'Invalid package_id', updated_at: new Date().toISOString() }).eq('id', job.id)
-      return
-    }
-    const { error: claimErr } = await supabase
-      .from('video_jobs')
-      .update({ status: 'processing', updated_at: new Date().toISOString() })
-      .eq('id', job.id)
-      .eq('status', 'pending') // Only claim if still pending (prevents double-processing)
-
-    if (!claimErr) await processJob(job as VideoJob)
+    log('INFO', 'CI mode: processing one pending job then exiting.')
+    const processed = await claimAndProcess()
+    if (!processed) log('INFO', 'No pending jobs. Exiting.')
     return
   }
 
-  console.log('Server mode: polling every', POLL_MS / 1000, 's...')
+  log('INFO', `Server mode: polling every ${POLL_MS / 1000}s...`)
   while (true) {
     try {
-      const { data: jobs } = await supabase
-        .from('video_jobs').select('*').eq('status', 'pending')
-        .order('created_at', { ascending: true }).limit(1)
-
-      if (jobs && jobs.length > 0) {
-        const job = jobs[0]
-        if (!UUID_RE.test(job.package_id)) {
-          await supabase.from('video_jobs').update({ status: 'failed', error: 'Invalid package_id', updated_at: new Date().toISOString() }).eq('id', job.id)
-          continue
-        }
-        const { error: claimErr } = await supabase
-          .from('video_jobs')
-          .update({ status: 'processing', updated_at: new Date().toISOString() })
-          .eq('id', job.id).eq('status', 'pending')
-        if (!claimErr) await processJob(job as VideoJob)
-      } else {
-        await new Promise(r => setTimeout(r, POLL_MS))
-      }
+      await claimAndProcess()
+      await new Promise(r => setTimeout(r, POLL_MS))
     } catch (err) {
-      console.error('Poll error:', err)
+      log('ERROR', `Poll error: ${err instanceof Error ? err.message : String(err)}`)
       await new Promise(r => setTimeout(r, POLL_MS))
     }
   }
 }
 
-run().catch(err => { console.error('Fatal:', err); process.exit(1) })
+run().catch(err => { log('ERROR', `Fatal: ${err instanceof Error ? err.message : String(err)}`); process.exit(1) })

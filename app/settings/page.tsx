@@ -263,7 +263,24 @@ create table tiktok_tokens (
 );
 
 -- If upgrading content_packages, run:
--- alter table content_packages add column if not exists video_url text;`}</pre>
+-- alter table content_packages add column if not exists video_url text;
+
+create table if not exists video_jobs (
+  id uuid default gen_random_uuid() primary key,
+  package_id text not null,
+  status text not null default 'pending',
+  error text,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+-- Block fake/non-UUID package_id values at the database level:
+alter table video_jobs
+  add constraint video_jobs_package_id_uuid
+  check (package_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
+
+-- Speed up worker queries that filter by status:
+create index if not exists video_jobs_status_idx on video_jobs (status);`}</pre>
         </div>
       </div>
     </div>

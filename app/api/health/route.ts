@@ -14,7 +14,7 @@ export async function GET() {
       supabase
         .from('video_jobs')
         .select('updated_at')
-        .eq('status', 'done')
+        .eq('status', 'complete')
         .order('updated_at', { ascending: false })
         .limit(1)
         .maybeSingle(),

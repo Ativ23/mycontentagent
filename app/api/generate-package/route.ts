@@ -125,6 +125,7 @@ VIRAL FORMATS THAT WORK:
 }
 
 export async function POST(req: NextRequest) {
+  try {
   const { idea, niche, tone } = await req.json()
 
   if (!idea || !niche || !tone) {
@@ -202,5 +203,9 @@ HOOK PATTERNS — use one:
     return NextResponse.json(pkg)
   } catch {
     return NextResponse.json({ error: 'Failed to parse content package from AI response' }, { status: 500 })
+  }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Script generation failed'
+    return NextResponse.json({ error: msg }, { status: 500 })
   }
 }

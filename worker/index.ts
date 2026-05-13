@@ -506,15 +506,19 @@ async function claimAndProcess() {
     return false
   }
 
-  // Atomic claim — only succeeds if the job is still pending
-  const { error: claimErr } = await supabase
+  // Atomic claim — only succeeds if the job is still 'pending'.
+  // We use .select('id') so Supabase returns the rows that were actually updated.
+  // If another worker already claimed this job, the WHERE status='pending' filter
+  // matches 0 rows and claimed will be an empty array — not an error.
+  const { data: claimed, error: claimErr } = await supabase
     .from('video_jobs')
     .update({ status: 'processing', updated_at: new Date().toISOString() })
     .eq('id', job.id)
     .eq('status', 'pending')
+    .select('id')
 
-  if (claimErr) {
-    log('WARN', `Failed to claim job (already claimed by another worker): ${claimErr.message}`, job.id)
+  if (claimErr || !claimed || claimed.length === 0) {
+    log('WARN', `Job already claimed by another worker, skipping`, job.id)
     return false
   }
 

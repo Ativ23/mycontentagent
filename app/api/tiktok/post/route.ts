@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseAdmin } from '@/lib/supabase'
+import { sendAlert } from '@/lib/alerts'
 
 async function getValidAccessToken(): Promise<string | null> {
   const supabase = getSupabaseAdmin()
@@ -107,11 +108,13 @@ export async function POST(req: NextRequest) {
 
     const publish_id = initData.data?.publish_id
     console.log('[tiktok/post] Queued via PULL_FROM_URL, publish_id:', publish_id)
+    sendAlert({ level: 'info', title: 'TikTok post queued', message: `publish_id: ${publish_id} (PULL_FROM_URL)` })
     return NextResponse.json({ success: true, publish_id, method: 'pull' })
 
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'TikTok post failed'
     console.error('[tiktok/post] Unexpected error:', msg)
+    sendAlert({ level: 'critical', title: 'TikTok post crashed', message: msg })
     return NextResponse.json({ error: msg }, { status: 500 })
   }
 }

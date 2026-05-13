@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { anthropic } from '@/lib/anthropic'
 
 export async function POST(req: NextRequest) {
+  try {
   const { script, niche } = await req.json()
 
   if (!script) {
@@ -60,5 +61,9 @@ If ANY check fails: set improved=true and put a fully rewritten script in "scrip
     return NextResponse.json(result)
   } catch {
     return NextResponse.json({ error: 'Failed to parse enhancement result' }, { status: 500 })
+  }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Script enhancement failed'
+    return NextResponse.json({ error: msg }, { status: 500 })
   }
 }

@@ -6,6 +6,7 @@ import { bundle } from '@remotion/bundler'
 import { renderMedia, selectComposition, ensureBrowser } from '@remotion/renderer'
 import type { Caption } from '@remotion/captions'
 import type { SceneData } from '../remotion/TikTokVideo'
+import { sendAlert } from '../lib/alerts'
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
@@ -420,10 +421,24 @@ async function processJob(job: VideoJob) {
     if (jobErr) log('ERROR', `video_jobs complete update failed: ${jobErr.message}`, jid)
 
     log('INFO', `✓ Complete: ${videoUrl}`, jid)
+    sendAlert({
+      level: 'info',
+      title: 'Video render complete',
+      message: videoUrl,
+      jobId: jid,
+      packageId: id,
+    })
 
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     log('ERROR', `✗ Failed: ${msg}`, jid)
+    sendAlert({
+      level: 'error',
+      title: 'Video render failed',
+      message: msg,
+      jobId: jid,
+      packageId: id,
+    })
     const { error: failErr } = await supabase.from('video_jobs').update({
       status: 'failed',
       error: msg,
@@ -463,7 +478,14 @@ async function resetStuckJobs() {
     .in('id', ids)
 
   if (resetErr) log('ERROR', `Failed to reset stuck jobs: ${resetErr.message}`)
-  else log('INFO', `Reset ${ids.length} stuck job(s) back to pending`)
+  else {
+    log('INFO', `Reset ${ids.length} stuck job(s) back to pending`)
+    sendAlert({
+      level: 'warn',
+      title: `${ids.length} stuck job(s) auto-recovered`,
+      message: `Jobs were stuck in "processing" for >${STUCK_JOB_MIN} min and have been reset to pending.`,
+    })
+  }
 }
 
 async function claimAndProcess() {

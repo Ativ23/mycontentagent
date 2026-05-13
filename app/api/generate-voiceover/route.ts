@@ -149,23 +149,38 @@ async function handleVoiceover(req: NextRequest) {
   // AI-selected settings from /api/select-voice take priority over niche defaults
   const voiceSettings = reqVoiceSettings ?? NICHE_VOICE_SETTINGS[niche] ?? DEFAULT_VOICE_SETTINGS
 
-  let elevenRes: Response
-  try {
-    // /with-timestamps returns JSON: { audio_base64, alignment: { characters, character_start_times_seconds, character_end_times_seconds } }
-    elevenRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps`, {
-      method: 'POST',
-      headers: {
-        'xi-api-key': apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        text: prepareForTTS(script),
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: voiceSettings,
-      }),
-    })
-  } catch {
-    return NextResponse.json({ error: 'Failed to reach ElevenLabs API' }, { status: 502 })
+  // Retry ElevenLabs up to 3 times — transient 5xx errors are common during peak hours
+  let elevenRes: Response | null = null
+  let lastElevenErr = ''
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 30_000)
+      // /with-timestamps returns JSON: { audio_base64, alignment: { ... } }
+      const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voice}/with-timestamps`, {
+        method: 'POST',
+        headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: prepareForTTS(script),
+          model_id: 'eleven_turbo_v2_5',
+          voice_settings: voiceSettings,
+        }),
+        signal: controller.signal,
+      })
+      clearTimeout(timer)
+      if (res.ok) { elevenRes = res; break }
+      lastElevenErr = await res.text()
+      // 429 rate-limit or 5xx transient — retry with backoff; 4xx auth errors are permanent
+      if (res.status < 500 && res.status !== 429) break
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * 2 ** (attempt - 1)))
+    } catch (e) {
+      lastElevenErr = e instanceof Error ? e.message : String(e)
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * 2 ** (attempt - 1)))
+    }
+  }
+
+  if (!elevenRes) {
+    return NextResponse.json({ error: `Failed to reach ElevenLabs API: ${lastElevenErr}` }, { status: 502 })
   }
 
   if (!elevenRes.ok) {

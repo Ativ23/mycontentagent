@@ -62,6 +62,7 @@ const VARIATION_SEEDS = [
 ]
 
 export async function POST(req: NextRequest) {
+  try {
   const { niche, tone } = await req.json()
 
   if (!niche || !tone) {
@@ -134,5 +135,9 @@ QUALITY BAR: Each idea must be specific enough that a viewer immediately knows E
     return NextResponse.json({ ideas })
   } catch {
     return NextResponse.json({ error: 'Failed to parse ideas from AI response' }, { status: 500 })
+  }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Idea generation failed'
+    return NextResponse.json({ error: msg }, { status: 500 })
   }
 }

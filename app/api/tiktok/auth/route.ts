@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
   const response = NextResponse.redirect(authUrl)
   response.cookies.set('tiktok_oauth_state', state, {
     httpOnly: true,
-    secure: false,
+    secure: process.env.VERCEL_ENV === 'production',
     maxAge: 600,
     path: '/',
     sameSite: 'lax',

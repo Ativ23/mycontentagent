@@ -67,8 +67,25 @@ export default function SettingsPage() {
             </div>
           )}
           {tikTokError && (
-            <div className="mb-4 px-4 py-3 rounded-lg bg-red-600/10 border border-red-600/30 text-red-400 text-sm">
-              {tikTokError}
+            <div className="mb-4 px-4 py-3 rounded-lg bg-red-600/10 border border-red-600/30 text-red-400 text-sm space-y-1">
+              <p className="font-medium">
+                {tikTokError === 'state_mismatch_retry' ? 'Session expired — click Connect again' :
+                 tikTokError.startsWith('token_exchange_') ? 'Token exchange failed' :
+                 tikTokError === 'no_code' ? 'TikTok did not return an auth code' :
+                 tikTokError === 'no_access_token' ? 'TikTok did not return an access token' :
+                 tikTokError === 'db_save_failed' ? 'Failed to save connection' :
+                 'TikTok connection failed'}
+              </p>
+              <p className="text-xs opacity-75">Error: {tikTokError}</p>
+              {tikTokError === 'state_mismatch_retry' && (
+                <p className="text-xs">Click &ldquo;Connect TikTok Account&rdquo; below — it will work this time.</p>
+              )}
+              {(tikTokError === 'token_exchange_400' || tikTokError === 'token_exchange_401') && (
+                <p className="text-xs">Confirm <code className="text-red-300">https://stacksmadesimple.xyz/api/tiktok/callback</code> is registered in your TikTok developer portal under Login Kit → Redirect URI.</p>
+              )}
+              {tikTokError === 'no_code' && (
+                <p className="text-xs">You may have denied the TikTok login or the session expired. Try connecting again.</p>
+              )}
             </div>
           )}
 
@@ -105,7 +122,7 @@ export default function SettingsPage() {
               <div className="bg-[#0a0a0f] border border-[#2a2a3a] rounded-lg p-3 text-xs text-[#8884a8] space-y-1">
                 <p className="text-white font-medium mb-1">Setup required first</p>
                 <p>1. Go to <span className="text-violet-300">developers.tiktok.com</span> → your app</p>
-                <p>2. Add redirect URI: <code className="text-violet-300">http://localhost:3000/api/tiktok/callback</code></p>
+                <p>2. Add redirect URI: <code className="text-violet-300">https://stacksmadesimple.xyz/api/tiktok/callback</code></p>
                 <p>3. Click &ldquo;Connect TikTok Account&rdquo; above</p>
               </div>
             </div>

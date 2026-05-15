@@ -90,8 +90,9 @@ export async function POST(req: NextRequest) {
     if (!initRes.ok) {
       const errText = await initRes.text()
       console.error('[tiktok/post] Init failed:', errText)
-      // Fall back to FILE_UPLOAD path if PULL_FROM_URL is not supported on this account
-      if (initRes.status === 400 || initRes.status === 422) {
+      // Fall back to FILE_UPLOAD if PULL_FROM_URL is not supported or URL ownership unverified
+      if (initRes.status === 400 || initRes.status === 422 || initRes.status === 403 ||
+          errText.includes('url_ownership_unverified')) {
         return await fileUploadFallback(accessToken, videoUrl)
       }
       return NextResponse.json({ error: `TikTok upload init failed: ${errText}` }, { status: 502 })

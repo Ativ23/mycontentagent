@@ -1,3 +1,10 @@
+import type { Metadata } from 'next'
+
+export const metadata: Metadata = {
+  title: 'Privacy Policy | Stacks Made Simple',
+  description: 'Privacy Policy for Stacks Made Simple — AI-powered short-form video creation platform.',
+}
+
 export default function PrivacyPage() {
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white py-16 px-6">

@@ -1,3 +1,10 @@
+import type { Metadata } from 'next'
+
+export const metadata: Metadata = {
+  title: 'Terms of Service | Stacks Made Simple',
+  description: 'Terms of Service for Stacks Made Simple — AI-powered short-form video creation platform.',
+}
+
 export default function TermsPage() {
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white py-16 px-6">

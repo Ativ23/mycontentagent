@@ -39,9 +39,10 @@ export const StatCard: React.FC<StatCardProps> = ({
           alignItems: 'center',
           gap: 20,
           padding: '64px 96px',
-          background: 'rgba(255,255,255,0.05)',
+          background: 'rgba(255,255,255,0.10)',
           borderRadius: 36,
-          border: `3px solid ${accentColor}50`,
+          border: `4px solid ${accentColor}`,
+          boxShadow: `0 0 60px ${accentColor}40, inset 0 0 40px ${accentColor}10`,
         }}
       >
         <div

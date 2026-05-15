@@ -59,9 +59,10 @@ export const ComparisonCard: React.FC<ComparisonCardProps> = ({
             alignItems: 'center',
             gap: 14,
             padding: '48px 40px',
-            background: 'rgba(255,82,82,0.1)',
+            background: 'rgba(255,82,82,0.18)',
             borderRadius: 28,
-            border: '3px solid rgba(255,82,82,0.35)',
+            border: '4px solid rgba(255,82,82,0.8)',
+            boxShadow: '0 0 40px rgba(255,82,82,0.25)',
             flex: 1,
           }}
         >
@@ -113,9 +114,10 @@ export const ComparisonCard: React.FC<ComparisonCardProps> = ({
             alignItems: 'center',
             gap: 14,
             padding: '48px 40px',
-            background: 'rgba(0,200,83,0.1)',
+            background: 'rgba(0,200,83,0.18)',
             borderRadius: 28,
-            border: '3px solid rgba(0,200,83,0.35)',
+            border: '4px solid rgba(0,200,83,0.8)',
+            boxShadow: '0 0 40px rgba(0,200,83,0.25)',
             flex: 1,
           }}
         >

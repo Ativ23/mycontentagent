@@ -20,8 +20,9 @@ export const RemotionRoot: React.FC = () => {
         audioUrl: '',
         captions: [],
         highlightWords: [],
-        scenes: [],            // Worker fills this with per-scene video data
-        bgColor: '#0e0820',
+        scenes: [],
+        animatedScenes: [],
+        bgColor: '#0a0e27',
         durationInSeconds: 30,
       } satisfies TikTokVideoProps}
     />

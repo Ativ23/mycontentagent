@@ -6,6 +6,10 @@ import type { Caption } from '@remotion/captions'
 import { CaptionPage } from './CaptionPage'
 import { SceneClip } from './SceneClip'
 import type { MotionStyle } from './SceneClip'
+import { AnimatedBackground } from './AnimatedBackground'
+import { StatCard } from './StatCard'
+import { TextCard } from './TextCard'
+import { ComparisonCard } from './ComparisonCard'
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -19,13 +23,33 @@ export interface SceneData {
   motionStyle: string       // 'slow-zoom' | 'pan-left' | 'pan-right' | 'punch-in' | 'quick-cut'
 }
 
+// Animated scene — used instead of stock footage when worker generates motion graphics
+export interface AnimatedSceneData {
+  type: 'stat' | 'comparison' | 'text' | 'hook'
+  startMs: number
+  durationMs: number
+  // stat
+  value?: string
+  label?: string
+  accentColor?: string
+  // comparison
+  leftValue?: string
+  leftLabel?: string
+  rightValue?: string
+  rightLabel?: string
+  // text / hook
+  headline?: string
+  subtext?: string
+}
+
 export interface TikTokVideoProps {
-  audioUrl: string          // ElevenLabs voiceover URL
-  captions: Caption[]       // Word-level timestamps from ElevenLabs
-  highlightWords: string[]  // Claude-picked words to show in red
-  scenes: SceneData[]       // Visual scenes (filled by worker)
-  bgColor: string           // Fallback background color if no visuals
-  durationInSeconds: number // Total video length
+  audioUrl: string             // ElevenLabs voiceover URL
+  captions: Caption[]          // Word-level timestamps from ElevenLabs
+  highlightWords: string[]     // Claude-picked words to show in red
+  scenes: SceneData[]          // Stock footage scenes (used when animatedScenes is absent)
+  animatedScenes?: AnimatedSceneData[]  // Motion graphics scenes (takes precedence if present)
+  bgColor: string              // Fallback background color if no visuals
+  durationInSeconds: number    // Total video length
 }
 
 // ─── Timing constant ───────────────────────────────────────────────────────────
@@ -39,9 +63,11 @@ export const TikTokVideo: React.FC<TikTokVideoProps> = ({
   captions,
   highlightWords,
   scenes,
+  animatedScenes,
   bgColor,
   durationInSeconds,
 }) => {
+  const useAnimated = !!animatedScenes && animatedScenes.length > 0
   // fps = frames per second (30 in our case).
   // We need this to convert milliseconds → frame numbers.
   // Formula: frameNumber = (milliseconds / 1000) * fps
@@ -63,54 +89,72 @@ export const TikTokVideo: React.FC<TikTokVideoProps> = ({
   )
 
   return (
-    // AbsoluteFill = a div that fills the entire 1080×1920 composition
     <AbsoluteFill style={{ backgroundColor: bgColor, overflow: 'hidden' }}>
 
-      {/* ── LAYER 1: Scene video clips ────────────────────────────────────────
-          Each scene is a <Sequence> — it only renders between its start and end frame.
-          Multiple scenes create the "cuts" you see in the final video.
-          They stack in order: scene 1 → scene 2 → scene 3 → etc.
+      {/* ── LAYER 1: Background ──────────────────────────────────────────────
+          Animated mode: dark gradient that slowly shifts hue.
+          Stock mode: Pexels video/image clips cut to scenes.
       */}
-      {scenes.map((scene, i) => {
-        // Convert milliseconds to frame numbers for Remotion
+      {useAnimated ? (
+        <AnimatedBackground />
+      ) : (
+        scenes.map((scene, i) => {
+          const fromFrame = Math.round((scene.startMs / 1000) * fps)
+          const durationInFrames = Math.max(1, Math.round((scene.durationMs / 1000) * fps))
+          return (
+            <Sequence key={i} from={fromFrame} durationInFrames={durationInFrames}>
+              <SceneClip
+                videoUrl={scene.videoUrl}
+                imageUrl={scene.imageUrl}
+                durationInFrames={durationInFrames}
+                motionStyle={scene.motionStyle as MotionStyle}
+              />
+            </Sequence>
+          )
+        })
+      )}
+
+      {/* ── LAYER 2: Animated graphics ───────────────────────────────────────
+          Only rendered in animated mode. Each scene shows a StatCard,
+          ComparisonCard, or TextCard timed to the voiceover.
+      */}
+      {useAnimated && animatedScenes!.map((scene, i) => {
         const fromFrame = Math.round((scene.startMs / 1000) * fps)
         const durationInFrames = Math.max(1, Math.round((scene.durationMs / 1000) * fps))
-
         return (
-          <Sequence key={i} from={fromFrame} durationInFrames={durationInFrames}>
-            <SceneClip
-              videoUrl={scene.videoUrl}
-              imageUrl={scene.imageUrl}
-              durationInFrames={durationInFrames}
-              motionStyle={scene.motionStyle as MotionStyle}
-            />
+          <Sequence key={`anim-${i}`} from={fromFrame} durationInFrames={durationInFrames}>
+            {scene.type === 'stat' && (
+              <StatCard value={scene.value!} label={scene.label!} accentColor={scene.accentColor} />
+            )}
+            {scene.type === 'comparison' && (
+              <ComparisonCard
+                leftValue={scene.leftValue!}
+                leftLabel={scene.leftLabel!}
+                rightValue={scene.rightValue!}
+                rightLabel={scene.rightLabel!}
+              />
+            )}
+            {(scene.type === 'text' || scene.type === 'hook') && (
+              <TextCard headline={scene.headline!} subtext={scene.subtext} type={scene.type} />
+            )}
           </Sequence>
         )
       })}
 
-      {/* ── LAYER 2: Gradient overlay ────────────────────────────────────────
-          This sits on top of ALL scenes.
-          It darkens the bottom of the frame so white caption text is always readable,
-          regardless of what color/brightness the background video is.
+      {/* ── LAYER 3: Gradient overlay ────────────────────────────────────────
+          Darkens bottom so captions stay readable over any background.
       */}
       <AbsoluteFill
         style={{
-          background: 'linear-gradient(to bottom, rgba(0,0,0,0.2) 0%, rgba(0,0,0,0.0) 35%, rgba(0,0,0,0.45) 70%, rgba(0,0,0,0.75) 100%)',
+          background: 'linear-gradient(to bottom, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.0) 30%, rgba(0,0,0,0.4) 65%, rgba(0,0,0,0.75) 100%)',
           pointerEvents: 'none',
         }}
       />
 
-      {/* ── LAYER 3: Audio ───────────────────────────────────────────────────
-          The ElevenLabs voiceover plays across the entire video.
-          It's not a layer you see — just the audio track.
-      */}
+      {/* ── LAYER 4: Audio ───────────────────────────────────────────────────*/}
       <Audio src={audioUrl} />
 
-      {/* ── LAYER 4: Captions ───────────────────────────────────────────────
-          Word-synced captions overlay ALL scenes.
-          Each caption page is also a <Sequence> timed to the word timestamps.
-          This is why the words light up exactly when they're spoken.
-      */}
+      {/* ── LAYER 5: Captions ───────────────────────────────────────────────*/}
       {pages.map((page, i) => {
         const nextPage = pages[i + 1] ?? null
         const startFrame = Math.round((page.startMs / 1000) * fps)
@@ -120,7 +164,6 @@ export const TikTokVideo: React.FC<TikTokVideoProps> = ({
             : startFrame + (SWITCH_CAPTIONS_EVERY_MS / 1000) * fps
         )
         const durationInFrames = Math.max(1, endFrame - startFrame)
-
         return (
           <Sequence key={`cap-${i}`} from={startFrame} durationInFrames={durationInFrames}>
             <CaptionPage page={page} highlightWords={highlightSet} />

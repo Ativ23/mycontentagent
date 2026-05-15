@@ -5,7 +5,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { bundle } from '@remotion/bundler'
 import { renderMedia, selectComposition, ensureBrowser } from '@remotion/renderer'
 import type { Caption } from '@remotion/captions'
-import type { SceneData } from '../remotion/TikTokVideo'
+import type { SceneData, AnimatedSceneData } from '../remotion/TikTokVideo'
 import { sendAlert } from '../lib/alerts'
 
 // ─── Config ────────────────────────────────────────────────────────────────────
@@ -187,6 +187,123 @@ function distributeSceneTiming(
   return result
 }
 
+// ─── Animated scene breakdown ─────────────────────────────────────────────────
+// Ask Claude Haiku to break the script into animated graphic scenes.
+// Returns typed scene definitions: stat cards, comparison cards, text cards.
+interface AnimatedSceneDef {
+  type: 'stat' | 'comparison' | 'text' | 'hook'
+  voiceLine: string
+  value?: string
+  label?: string
+  leftValue?: string
+  leftLabel?: string
+  rightValue?: string
+  rightLabel?: string
+  headline?: string
+  subtext?: string
+}
+
+async function breakIntoAnimatedScenes(script: string): Promise<AnimatedSceneDef[]> {
+  if (!anthropic) {
+    return [{ type: 'text', voiceLine: script, headline: 'Watch this', subtext: 'Important finance tip' }]
+  }
+
+  try {
+    const res = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1000,
+      messages: [{
+        role: 'user',
+        content: `Build animated graphics for a TikTok finance video. Break this script into visual scenes.
+
+Script:
+"""
+${script}
+"""
+
+Scene types:
+- "hook": First scene only. Bold short statement to grab attention (max 5 words headline).
+- "stat": A specific number/percentage/dollar amount is mentioned. Extract it exactly from the script.
+- "comparison": Two values are contrasted (e.g. 0.01% vs 5%). Both values must appear in the voiceLine.
+- "text": Key concept, tip, or takeaway. Punchy headline (max 5 words).
+
+Rules:
+- Cover the ENTIRE script. Every word must be in exactly one scene.
+- voiceLine: copy the EXACT words from the script spoken during this scene.
+- For "stat": value = the exact number/percentage/amount, label = what it measures (short).
+- For "comparison": leftValue/leftLabel = the worse option, rightValue/rightLabel = the better option.
+- For "text"/"hook": headline max 5 words, subtext optional (max 8 words).
+- Aim for 4-6 scenes total.
+
+Return ONLY a valid JSON array, no other text:
+[
+  {"type":"hook","voiceLine":"...","headline":"Short hook","subtext":"optional subtitle"},
+  {"type":"stat","voiceLine":"...","value":"0.01%","label":"average savings rate"},
+  {"type":"comparison","voiceLine":"...","leftValue":"0.01%","leftLabel":"Regular Bank","rightValue":"5.00%","rightLabel":"High-Yield Savings"},
+  {"type":"text","voiceLine":"...","headline":"Switch today","subtext":"takes 5 minutes"}
+]`,
+      }],
+    })
+
+    const raw = res.content[0].type === 'text' ? res.content[0].text : '[]'
+    const parsed: AnimatedSceneDef[] = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] ?? '[]')
+    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('empty scene list')
+    return parsed
+  } catch (e) {
+    console.warn('Animated scene breakdown failed, using fallback:', e)
+    return [{ type: 'text', voiceLine: script, headline: 'Watch this', subtext: 'Important finance tip' }]
+  }
+}
+
+// ─── Align animated scenes to real word timings ────────────────────────────────
+// Matches the first words of each scene's voiceLine against the ElevenLabs word
+// timestamps so scene cuts happen exactly when the speaker starts saying that line.
+function alignAnimatedScenes(
+  scenes: AnimatedSceneDef[],
+  captions: Caption[],
+  durationInSeconds: number,
+): AnimatedSceneData[] {
+  const totalMs = durationInSeconds * 1000
+
+  const captionWords = captions.map(c => ({
+    clean: c.text.trim().toLowerCase().replace(/[^a-z0-9]/g, ''),
+    startMs: c.startMs,
+  })).filter(w => w.clean)
+
+  const result: Array<AnimatedSceneDef & { startMs: number; durationMs: number }> = []
+
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i]
+    let startMs = i === 0 ? 0 : result[i - 1].startMs + result[i - 1].durationMs
+
+    if (i > 0 && captionWords.length > 0) {
+      const searchWords = scene.voiceLine
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '')
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 3)
+
+      outer: for (let j = 0; j < captionWords.length - searchWords.length + 1; j++) {
+        for (let k = 0; k < searchWords.length; k++) {
+          if (captionWords[j + k]?.clean !== searchWords[k]) continue outer
+        }
+        startMs = captionWords[j].startMs
+        break
+      }
+    }
+
+    result.push({ ...scene, startMs, durationMs: 0 })
+  }
+
+  for (let i = 0; i < result.length; i++) {
+    const nextStart = result[i + 1]?.startMs ?? totalMs
+    result[i].durationMs = Math.max(500, nextStart - result[i].startMs)
+  }
+
+  return result as AnimatedSceneData[]
+}
+
 // ─── Pexels Video search ───────────────────────────────────────────────────────
 // Search Pexels for a real video clip matching the scene's visual keywords.
 // We try each keyword in order and return the first good result.
@@ -329,30 +446,16 @@ async function processJob(job: VideoJob) {
     }
     log('INFO', `[3/7] Highlight words: ${highlightWords.join(', ') || '(none)'}`, jid)
 
-    // ── STEP 4: Scene breakdown ────────────────────────────────────────────
-    log('INFO', '[4/7] Breaking script into scenes...', jid)
-    const sceneDefs = await breakIntoScenes(job.script, duration)
-    const timings   = distributeSceneTiming(sceneDefs, duration)
-    log('INFO', `[4/7] ${sceneDefs.length} scenes identified`, jid)
+    // ── STEP 4: Generate animated scenes ──────────────────────────────────
+    log('INFO', '[4/7] Generating animated scenes...', jid)
+    const animatedSceneDefs = await breakIntoAnimatedScenes(job.script)
+    log('INFO', `[4/7] ${animatedSceneDefs.length} animated scenes generated`, jid)
 
-    // ── STEP 5: Fetch visuals in parallel ──────────────────────────────────
-    log('INFO', '[5/7] Fetching visuals from Pexels...', jid)
-    const scenes: SceneData[] = await Promise.all(
-      sceneDefs.map(async (scene, i) => {
-        const videoUrl = await searchPexelsVideo(scene.visualKeywords)
-        const imageUrl = videoUrl ? null : await searchPexelsImage(scene.visualKeywords)
-        return {
-          videoUrl,
-          imageUrl,
-          startMs: timings[i].startMs,
-          durationMs: timings[i].durationMs,
-          motionStyle: scene.motionStyle,
-        }
-      })
-    )
-    const videoCount = scenes.filter(s => s.videoUrl).length
-    const imageCount = scenes.filter(s => s.imageUrl).length
-    log('INFO', `[5/7] Visuals: ${videoCount} videos, ${imageCount} images, ${scenes.length - videoCount - imageCount} solid-color`, jid)
+    // ── STEP 5: Align scenes to word timings ───────────────────────────────
+    log('INFO', '[5/7] Aligning scenes to voice timings...', jid)
+    const animatedScenes: AnimatedSceneData[] = alignAnimatedScenes(animatedSceneDefs, captions, duration)
+    const scenes: SceneData[] = [] // not used in animated mode
+    log('INFO', `[5/7] Scenes aligned: ${animatedScenes.map(s => s.type).join(', ')}`, jid)
 
     // ── STEP 6: Bundle ─────────────────────────────────────────────────────
     log('INFO', '[6/7] Bundling Remotion composition...', jid)
@@ -366,7 +469,8 @@ async function processJob(job: VideoJob) {
       captions,
       highlightWords,
       scenes,
-      bgColor: '#0e0820',
+      animatedScenes,
+      bgColor: '#0a0e27',
       durationInSeconds: duration,
     }
 

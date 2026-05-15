@@ -7,7 +7,8 @@ import { CaptionPage } from './CaptionPage'
 import { SceneClip } from './SceneClip'
 import type { MotionStyle } from './SceneClip'
 import { AnimatedBackground } from './AnimatedBackground'
-import { StatCard } from './StatCard'
+import { CounterCard } from './CounterCard'
+import { StepsCard } from './StepsCard'
 import { TextCard } from './TextCard'
 import { ComparisonCard } from './ComparisonCard'
 
@@ -23,16 +24,17 @@ export interface SceneData {
   motionStyle: string       // 'slow-zoom' | 'pan-left' | 'pan-right' | 'punch-in' | 'quick-cut'
 }
 
-// Animated scene — used instead of stock footage when worker generates motion graphics
+// Animated scene — universal types that work for any niche
 export interface AnimatedSceneData {
-  type: 'stat' | 'comparison' | 'text' | 'hook'
+  type: 'hook' | 'counter' | 'comparison' | 'steps' | 'text'
   startMs: number
   durationMs: number
-  // stat
-  value?: string
-  label?: string
   accentColor?: string
-  // comparison
+  // counter — any number counting up (calories, dollars, minutes, reps, %)
+  value?: string
+  unit?: string
+  label?: string
+  // comparison — any two-item contrast
   leftValue?: string
   leftLabel?: string
   rightValue?: string
@@ -40,6 +42,8 @@ export interface AnimatedSceneData {
   // text / hook
   headline?: string
   subtext?: string
+  // steps — sequential process (tutorials, how-tos, recipes)
+  items?: string[]
 }
 
 export interface TikTokVideoProps {
@@ -123,8 +127,13 @@ export const TikTokVideo: React.FC<TikTokVideoProps> = ({
         const durationInFrames = Math.max(1, Math.round((scene.durationMs / 1000) * fps))
         return (
           <Sequence key={`anim-${i}`} from={fromFrame} durationInFrames={durationInFrames}>
-            {scene.type === 'stat' && (
-              <StatCard value={scene.value!} label={scene.label!} accentColor={scene.accentColor} />
+            {scene.type === 'counter' && (
+              <CounterCard
+                value={scene.value!}
+                unit={scene.unit ?? ''}
+                label={scene.label ?? ''}
+                accentColor={scene.accentColor}
+              />
             )}
             {scene.type === 'comparison' && (
               <ComparisonCard
@@ -133,6 +142,9 @@ export const TikTokVideo: React.FC<TikTokVideoProps> = ({
                 rightValue={scene.rightValue!}
                 rightLabel={scene.rightLabel!}
               />
+            )}
+            {scene.type === 'steps' && (
+              <StepsCard items={scene.items ?? []} accentColor={scene.accentColor} />
             )}
             {(scene.type === 'text' || scene.type === 'hook') && (
               <TextCard headline={scene.headline!} subtext={scene.subtext} type={scene.type} />

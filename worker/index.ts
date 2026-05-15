@@ -191,21 +191,28 @@ function distributeSceneTiming(
 // Ask Claude Haiku to break the script into animated graphic scenes.
 // Returns typed scene definitions: stat cards, comparison cards, text cards.
 interface AnimatedSceneDef {
-  type: 'stat' | 'comparison' | 'text' | 'hook'
+  type: 'hook' | 'counter' | 'comparison' | 'steps' | 'text'
   voiceLine: string
+  accentColor?: string
+  // counter
   value?: string
+  unit?: string
   label?: string
+  // comparison
   leftValue?: string
   leftLabel?: string
   rightValue?: string
   rightLabel?: string
+  // text / hook
   headline?: string
   subtext?: string
+  // steps
+  items?: string[]
 }
 
 async function breakIntoAnimatedScenes(script: string): Promise<AnimatedSceneDef[]> {
   if (!anthropic) {
-    return [{ type: 'text', voiceLine: script, headline: 'Watch this', subtext: 'Important finance tip' }]
+    return [{ type: 'text', voiceLine: script, headline: 'Watch this', subtext: 'You need to know this' }]
   }
 
   try {
@@ -214,33 +221,38 @@ async function breakIntoAnimatedScenes(script: string): Promise<AnimatedSceneDef
       max_tokens: 1000,
       messages: [{
         role: 'user',
-        content: `Build animated graphics for a TikTok finance video. Break this script into visual scenes.
+        content: `You are building animated graphics for a short-form video. The content could be ANY niche — fitness, cooking, finance, travel, gaming, tech, beauty, education, or anything else.
 
 Script:
 """
 ${script}
 """
 
-Scene types:
-- "hook": First scene only. Bold short statement to grab attention (max 5 words headline).
-- "stat": A specific number/percentage/dollar amount is mentioned. Extract it exactly from the script.
-- "comparison": Two values are contrasted (e.g. 0.01% vs 5%). Both values must appear in the voiceLine.
-- "text": Key concept, tip, or takeaway. Punchy headline (max 5 words).
+Break this into 4-6 visual scenes. Each scene shows an animated graphic while those exact words are spoken.
+
+Scene types — pick whichever fits the content naturally:
+- "hook": Opening scene only. Bold attention-grabber (max 5 word headline).
+- "counter": Any specific number/quantity spoken aloud — counts up from zero on screen. Use for: calories, dollars, minutes, reps, km, followers, steps, ingredients, years, anything countable.
+- "comparison": Two things contrasted — good vs bad, before vs after, option A vs B. Both sides must appear in the voiceLine.
+- "steps": A process or sequence with 2-4 clear steps. Use for how-tos, recipes, routines, tutorials.
+- "text": Key insight, tip, or takeaway. Punchy headline (max 5 words).
 
 Rules:
-- Cover the ENTIRE script. Every word must be in exactly one scene.
-- voiceLine: copy the EXACT words from the script spoken during this scene.
-- For "stat": value = the exact number/percentage/amount, label = what it measures (short).
-- For "comparison": leftValue/leftLabel = the worse option, rightValue/rightLabel = the better option.
-- For "text"/"hook": headline max 5 words, subtext optional (max 8 words).
-- Aim for 4-6 scenes total.
+- Cover the ENTIRE script. Every word in exactly one scene.
+- voiceLine: EXACT words from the script, nothing added or removed.
+- counter: value = exact number as string ("500", "5.0%", "$1,000", "30"), unit = short label ("calories", "per year", "minutes"), label = optional extra context.
+- comparison: leftValue/leftLabel = worse/before/A side. rightValue/rightLabel = better/after/B side.
+- steps: items = array of 2-4 short step strings (max 6 words each).
+- text/hook: headline max 5 words, subtext optional max 8 words.
+- accentColor: pick a hex that fits the mood — #7c3aed violet, #0ea5e9 blue, #f97316 orange, #22c55e green, #ec4899 pink, #eab308 yellow.
 
 Return ONLY a valid JSON array, no other text:
 [
-  {"type":"hook","voiceLine":"...","headline":"Short hook","subtext":"optional subtitle"},
-  {"type":"stat","voiceLine":"...","value":"0.01%","label":"average savings rate"},
-  {"type":"comparison","voiceLine":"...","leftValue":"0.01%","leftLabel":"Regular Bank","rightValue":"5.00%","rightLabel":"High-Yield Savings"},
-  {"type":"text","voiceLine":"...","headline":"Switch today","subtext":"takes 5 minutes"}
+  {"type":"hook","voiceLine":"...","headline":"Opener here","subtext":"optional"},
+  {"type":"counter","voiceLine":"...","value":"500","unit":"calories","label":"burned per session","accentColor":"#f97316"},
+  {"type":"comparison","voiceLine":"...","leftValue":"Cardio","leftLabel":"60 min for 500 cal","rightValue":"HIIT","rightLabel":"20 min for 500 cal"},
+  {"type":"steps","voiceLine":"...","items":["Step one","Step two","Step three"],"accentColor":"#0ea5e9"},
+  {"type":"text","voiceLine":"...","headline":"Key takeaway","subtext":"optional"}
 ]`,
       }],
     })
@@ -251,7 +263,7 @@ Return ONLY a valid JSON array, no other text:
     return parsed
   } catch (e) {
     console.warn('Animated scene breakdown failed, using fallback:', e)
-    return [{ type: 'text', voiceLine: script, headline: 'Watch this', subtext: 'Important finance tip' }]
+    return [{ type: 'text', voiceLine: script, headline: 'Watch this', subtext: 'You need to know this' }]
   }
 }
 

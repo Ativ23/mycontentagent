@@ -17,8 +17,8 @@ export default function Sidebar() {
     <aside className="w-60 shrink-0 flex flex-col h-screen bg-[#111118] border-r border-[#2a2a3a]">
       <div className="px-6 py-6 border-b border-[#2a2a3a]">
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-violet-600 flex items-center justify-center text-sm font-bold">M</div>
-          <span className="font-semibold text-white">MyContentAgent</span>
+          <div className="w-8 h-8 rounded-lg bg-violet-600 flex items-center justify-center text-sm font-bold">$</div>
+          <span className="font-semibold text-white">Stacks Made Simple</span>
         </div>
         <p className="text-[11px] text-[#8884a8] mt-1 ml-10">TikTok Content AI</p>
       </div>
@@ -44,7 +44,7 @@ export default function Sidebar() {
       </nav>
 
       <div className="px-6 py-4 border-t border-[#2a2a3a]">
-        <p className="text-[11px] text-[#8884a8]">MVP v1.0</p>
+        <p className="text-[11px] text-[#8884a8]">v2.0 — HeyGen Avatar</p>
       </div>
     </aside>
   )

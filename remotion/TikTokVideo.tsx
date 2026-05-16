@@ -96,12 +96,12 @@ export const TikTokVideo: React.FC<TikTokVideoProps> = ({
     <AbsoluteFill style={{ backgroundColor: bgColor, overflow: 'hidden' }}>
 
       {/* ── LAYER 1: Background ──────────────────────────────────────────────
-          Animated mode: dark gradient that slowly shifts hue.
-          Stock mode: Pexels video/image clips cut to scenes.
+          Priority order:
+          1. scenes[] has URLs → Runway/stock video clips (best quality)
+          2. animatedScenes present, no clips → dark gradient fallback
+          3. Neither → solid bgColor
       */}
-      {useAnimated ? (
-        <AnimatedBackground />
-      ) : (
+      {scenes.length > 0 ? (
         scenes.map((scene, i) => {
           const fromFrame = Math.round((scene.startMs / 1000) * fps)
           const durationInFrames = Math.max(1, Math.round((scene.durationMs / 1000) * fps))
@@ -116,7 +116,9 @@ export const TikTokVideo: React.FC<TikTokVideoProps> = ({
             </Sequence>
           )
         })
-      )}
+      ) : useAnimated ? (
+        <AnimatedBackground />
+      ) : null}
 
       {/* ── LAYER 2: Animated graphics ───────────────────────────────────────
           Only rendered in animated mode. Each scene shows a StatCard,

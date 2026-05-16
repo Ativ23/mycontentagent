@@ -5,6 +5,12 @@
 
 ---
 
+## Demo
+
+![App Screenshot](public/demo.png)
+
+---
+
 ## The Problem It Solves
 
 Creating consistent TikTok content is a full-time job:
@@ -110,8 +116,8 @@ mycontentagent/
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/Ativ23/mycontentagent.git
-cd mycontentagent
+git clone https://github.com/Ativ23/stacksmadesimple.git
+cd stacksmadesimple
 
 # 2. Install dependencies
 npm install
@@ -149,13 +155,15 @@ npm run studio
 ✅ Word-synced animated captions  
 ✅ Ken Burns background motion  
 ✅ Content library  
+✅ TikTok OAuth + auto-post to TikTok  
+✅ Animated motion graphics (niche-agnostic — finance, fitness, cooking, gaming, travel, and more)  
 ✅ Live at [stacksmadesimple.xyz](https://stacksmadesimple.xyz)  
 
 ---
 
 ## Roadmap
 
-- [ ] TikTok OAuth integration (auto-post directly to TikTok)
+- [ ] TikTok production approval (currently in sandbox mode)
 - [ ] D-ID avatar videos (talking head at 1K followers milestone)
 - [ ] Multiple video templates (news-style, listicle, talking head)
 - [ ] SaaS tiers ($25 / $59 / $99/month)

@@ -13,6 +13,7 @@ import { sendAlert } from '../lib/alerts'
 const SUPABASE_URL  = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const SUPABASE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY!
 const PEXELS_KEY    = process.env.PEXELS_API_KEY ?? ''
+const RUNWAY_KEY    = process.env.RUNWAYML_API_SECRET ?? ''
 const POLL_MS       = 5_000
 const TMP           = '/tmp/videoworker'
 const UUID_RE       = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -208,6 +209,8 @@ interface AnimatedSceneDef {
   subtext?: string
   // steps
   items?: string[]
+  // runway background clip prompt
+  visualPrompt?: string
 }
 
 async function breakIntoAnimatedScenes(script: string): Promise<AnimatedSceneDef[]> {
@@ -245,14 +248,15 @@ Rules:
 - steps: items = array of 2-4 short step strings (max 6 words each).
 - text/hook: headline max 5 words, subtext optional max 8 words.
 - accentColor: pick a hex that fits the mood — #7c3aed violet, #0ea5e9 blue, #f97316 orange, #22c55e green, #ec4899 pink, #eab308 yellow.
+- visualPrompt: 15-20 word cinematic description for an AI video background clip. Vertical 9:16 shot. Real-world scene, no text or logos. Match the mood and subject of the voiceLine. Examples: "Person lifting weights in modern gym, dramatic lighting, slow motion, vertical", "Close-up hands counting money on wooden desk, warm tones, cinematic", "Aerial city at night, neon lights, rain-wet streets, vertical frame".
 
 Return ONLY a valid JSON array, no other text:
 [
-  {"type":"hook","voiceLine":"...","headline":"Opener here","subtext":"optional"},
-  {"type":"counter","voiceLine":"...","value":"500","unit":"calories","label":"burned per session","accentColor":"#f97316"},
-  {"type":"comparison","voiceLine":"...","leftValue":"Cardio","leftLabel":"60 min for 500 cal","rightValue":"HIIT","rightLabel":"20 min for 500 cal"},
-  {"type":"steps","voiceLine":"...","items":["Step one","Step two","Step three"],"accentColor":"#0ea5e9"},
-  {"type":"text","voiceLine":"...","headline":"Key takeaway","subtext":"optional"}
+  {"type":"hook","voiceLine":"...","headline":"Opener here","subtext":"optional","visualPrompt":"Dramatic establishing shot matching the hook topic, cinematic"},
+  {"type":"counter","voiceLine":"...","value":"500","unit":"calories","label":"burned per session","accentColor":"#f97316","visualPrompt":"Person doing intense workout in modern gym, close-up, dramatic lighting"},
+  {"type":"comparison","voiceLine":"...","leftValue":"Cardio","leftLabel":"60 min for 500 cal","rightValue":"HIIT","rightLabel":"20 min for 500 cal","visualPrompt":"Side by side workout comparison, gym environment, vertical frame"},
+  {"type":"steps","voiceLine":"...","items":["Step one","Step two","Step three"],"accentColor":"#0ea5e9","visualPrompt":"Hands-on tutorial activity close-up, clean environment, natural light"},
+  {"type":"text","voiceLine":"...","headline":"Key takeaway","subtext":"optional","visualPrompt":"Cinematic wide shot reinforcing the key message, vertical, moody"}
 ]`,
       }],
     })
@@ -314,6 +318,101 @@ function alignAnimatedScenes(
   }
 
   return result as AnimatedSceneData[]
+}
+
+// ─── Runway video clip generation ─────────────────────────────────────────────
+// Submits a text-to-video task to Runway Gen-4 Turbo, polls until complete,
+// downloads the clip, re-uploads to Supabase (Runway URLs expire ~24h),
+// and returns the permanent Supabase public URL. Returns null on any failure
+// so the caller can fall back to the animated gradient background.
+async function generateRunwayClip(
+  prompt: string,
+  packageId: string,
+  sceneIdx: number,
+  jid: string,
+): Promise<string | null> {
+  if (!RUNWAY_KEY) return null
+
+  log('INFO', `  Runway [${sceneIdx}] submitting: "${prompt.slice(0, 60)}..."`, jid)
+
+  try {
+    const submitRes = await fetchWithTimeout(
+      'https://api.dev.runwayml.com/v1/text_to_video',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RUNWAY_KEY}`,
+          'Content-Type': 'application/json',
+          'X-Runway-Version': '2024-11-06',
+        },
+        body: JSON.stringify({
+          promptText: prompt,
+          ratio: '720:1280',  // 9:16 vertical
+          duration: 5,        // 5 seconds per clip
+          model: 'gen4_turbo',
+        }),
+      },
+      30_000,
+    )
+
+    if (!submitRes.ok) {
+      log('WARN', `  Runway [${sceneIdx}] submit ${submitRes.status}: ${await submitRes.text()}`, jid)
+      return null
+    }
+
+    const { id: taskId } = await submitRes.json() as { id: string }
+    log('INFO', `  Runway [${sceneIdx}] task ${taskId} polling...`, jid)
+
+    // Poll until SUCCEEDED or FAILED (max 2 minutes)
+    const deadline = Date.now() + 120_000
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 5_000))
+
+      const pollRes = await fetchWithTimeout(
+        `https://api.dev.runwayml.com/v1/tasks/${taskId}`,
+        { headers: { 'Authorization': `Bearer ${RUNWAY_KEY}`, 'X-Runway-Version': '2024-11-06' } },
+        15_000,
+      )
+      if (!pollRes.ok) continue
+
+      const task = await pollRes.json() as { status: string; output?: string[] }
+
+      if (task.status === 'SUCCEEDED' && task.output?.[0]) {
+        // Download from Runway and re-upload to Supabase for a permanent URL
+        const clipPath = join(TMP, `clip_${packageId}_${sceneIdx}.mp4`)
+        const ok = await downloadFile(task.output[0], clipPath)
+        if (!ok) return null
+
+        const clipBytes = readFileSync(clipPath)
+        try { unlinkSync(clipPath) } catch { /* ignore */ }
+
+        const storageKey = `clips/${packageId}_${sceneIdx}.mp4`
+        const { error } = await supabase.storage
+          .from('videos')
+          .upload(storageKey, clipBytes, { contentType: 'video/mp4', upsert: true })
+
+        if (error) {
+          log('WARN', `  Runway [${sceneIdx}] upload failed: ${error.message}`, jid)
+          return null
+        }
+
+        const { data: { publicUrl } } = supabase.storage.from('videos').getPublicUrl(storageKey)
+        log('INFO', `  Runway [${sceneIdx}] done ✓`, jid)
+        return publicUrl
+      }
+
+      if (task.status === 'FAILED') {
+        log('WARN', `  Runway [${sceneIdx}] task failed`, jid)
+        return null
+      }
+    }
+
+    log('WARN', `  Runway [${sceneIdx}] timed out after 2 min`, jid)
+    return null
+  } catch (err) {
+    log('WARN', `  Runway [${sceneIdx}] error: ${err instanceof Error ? err.message : String(err)}`, jid)
+    return null
+  }
 }
 
 // ─── Pexels Video search ───────────────────────────────────────────────────────
@@ -400,7 +499,7 @@ async function processJob(job: VideoJob) {
 
   try {
     // ── STEP 1: Download audio + measure duration ──────────────────────────
-    log('INFO', '[1/7] Downloading audio...', jid)
+    log('INFO', '[1/8] Downloading audio...', jid)
     const downloaded = await retry(() => downloadFile(job.audio_url, audioPath), 3, 'download-audio')
     if (!downloaded) throw new Error('Failed to download audio after 3 attempts')
 
@@ -408,10 +507,10 @@ async function processJob(job: VideoJob) {
     const meta = await parseFile(audioPath)
     const duration = meta.format.duration
     if (!duration || isNaN(duration)) throw new Error('Could not determine audio duration')
-    log('INFO', `[1/7] Duration: ${duration.toFixed(1)}s`, jid)
+    log('INFO', `[1/8] Duration: ${duration.toFixed(1)}s`, jid)
 
     // ── STEP 2: Word timings → Caption[] ───────────────────────────────────
-    log('INFO', '[2/7] Fetching word timings...', jid)
+    log('INFO', '[2/8] Fetching word timings...', jid)
     let captions: Caption[] = []
     try {
       const { data: { publicUrl: timingsUrl } } = supabase.storage
@@ -427,9 +526,9 @@ async function processJob(job: VideoJob) {
         timestampMs: Math.round(w.start * 1000),
         confidence: null,
       }))
-      log('INFO', `[2/7] ${captions.length} word timings loaded`, jid)
+      log('INFO', `[2/8] ${captions.length} word timings loaded`, jid)
     } catch (err) {
-      log('WARN', `[2/7] Timings unavailable (${err instanceof Error ? err.message : String(err)}), using even-split fallback`, jid)
+      log('WARN', `[2/8] Timings unavailable (${err instanceof Error ? err.message : String(err)}), using even-split fallback`, jid)
       const words = job.script.split(/\s+/).filter(Boolean)
       const wordDurMs = (duration * 1000) / words.length
       captions = words.map((word, i) => ({
@@ -442,7 +541,7 @@ async function processJob(job: VideoJob) {
     }
 
     // ── STEP 3: Highlight words ────────────────────────────────────────────
-    log('INFO', '[3/7] Getting highlight words...', jid)
+    log('INFO', '[3/8] Getting highlight words...', jid)
     let highlightWords: string[] = []
     if (anthropic) {
       try {
@@ -453,24 +552,48 @@ async function processJob(job: VideoJob) {
         const raw = hlRes.content[0].type === 'text' ? (hlRes.content[0] as { type: 'text'; text: string }).text : '[]'
         highlightWords = JSON.parse(raw.match(/\[[\s\S]*?\]/)?.[0] ?? '[]')
       } catch (err) {
-        log('WARN', `[3/7] Highlight words failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`, jid)
+        log('WARN', `[3/8] Highlight words failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`, jid)
       }
     }
-    log('INFO', `[3/7] Highlight words: ${highlightWords.join(', ') || '(none)'}`, jid)
+    log('INFO', `[3/8] Highlight words: ${highlightWords.join(', ') || '(none)'}`, jid)
 
     // ── STEP 4: Generate animated scenes ──────────────────────────────────
-    log('INFO', '[4/7] Generating animated scenes...', jid)
+    log('INFO', '[4/8] Generating animated scenes...', jid)
     const animatedSceneDefs = await breakIntoAnimatedScenes(job.script)
-    log('INFO', `[4/7] ${animatedSceneDefs.length} animated scenes generated`, jid)
+    log('INFO', `[4/8] ${animatedSceneDefs.length} animated scenes generated`, jid)
 
     // ── STEP 5: Align scenes to word timings ───────────────────────────────
-    log('INFO', '[5/7] Aligning scenes to voice timings...', jid)
+    log('INFO', '[5/8] Aligning scenes to voice timings...', jid)
     const animatedScenes: AnimatedSceneData[] = alignAnimatedScenes(animatedSceneDefs, captions, duration)
-    const scenes: SceneData[] = [] // not used in animated mode
-    log('INFO', `[5/7] Scenes aligned: ${animatedScenes.map(s => s.type).join(', ')}`, jid)
+    log('INFO', `[5/8] Scenes aligned: ${animatedScenes.map(s => s.type).join(', ')}`, jid)
+
+    // ── STEP 5.5: Generate Runway background clips ─────────────────────────
+    // Run all Runway requests in parallel — typically 30-90s total.
+    // Each clip is 5s of AI-generated vertical video matching the scene content.
+    // Falls back to empty array (animated gradient) if RUNWAY_KEY is not set.
+    log('INFO', '[5.5/8] Generating Runway background clips...', jid)
+    let scenes: SceneData[] = []
+    if (RUNWAY_KEY) {
+      const runwayUrls = await Promise.all(
+        animatedSceneDefs.map((def, i) =>
+          generateRunwayClip(def.visualPrompt ?? def.voiceLine, id, i, jid)
+        )
+      )
+      scenes = animatedScenes.map((scene, i) => ({
+        videoUrl: runwayUrls[i] ?? null,
+        imageUrl: null,
+        startMs: scene.startMs,
+        durationMs: scene.durationMs,
+        motionStyle: 'quick-cut' as const,  // Runway clips have their own motion
+      }))
+      const hit = runwayUrls.filter(Boolean).length
+      log('INFO', `[5.5/8] ${hit}/${animatedSceneDefs.length} Runway clips generated`, jid)
+    } else {
+      log('INFO', '[5.5/8] No RUNWAY_KEY — using animated gradient background', jid)
+    }
 
     // ── STEP 6: Bundle ─────────────────────────────────────────────────────
-    log('INFO', '[6/7] Bundling Remotion composition...', jid)
+    log('INFO', '[6/8] Bundling Remotion composition...', jid)
     const serveUrl = await getBundle()
 
     await ensureBrowser()
@@ -489,7 +612,7 @@ async function processJob(job: VideoJob) {
     const composition = await selectComposition({ serveUrl, id: 'TikTokVideo', inputProps })
 
     // ── STEP 7: Render ─────────────────────────────────────────────────────
-    log('INFO', '[7/7] Rendering video...', jid)
+    log('INFO', '[7/8] Rendering video...', jid)
     let lastLoggedPct = -1
     await renderMedia({
       composition: { ...composition, durationInFrames: Math.ceil(duration * 30) },
@@ -511,7 +634,7 @@ async function processJob(job: VideoJob) {
     log('INFO', 'Render complete', jid)
 
     // ── STEP 8: Upload ─────────────────────────────────────────────────────
-    log('INFO', 'Uploading video to Supabase...', jid)
+    log('INFO', '[8/8] Uploading video to Supabase...', jid)
     const videoBytes = readFileSync(videoPath)
     const { error: uploadErr } = await retry(
       () => supabase.storage.from('videos').upload(`${id}.mp4`, videoBytes, { contentType: 'video/mp4', upsert: true }),

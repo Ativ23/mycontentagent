@@ -13,7 +13,8 @@ import { sendAlert } from '../lib/alerts'
 const SUPABASE_URL  = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const SUPABASE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY!
 const PEXELS_KEY    = process.env.PEXELS_API_KEY ?? ''
-const RUNWAY_KEY    = process.env.RUNWAYML_API_SECRET ?? ''
+const HEYGEN_KEY    = process.env.HEYGEN_API_KEY ?? ''
+const HEYGEN_AVATAR = 'Marcus_expressive_2024120201'  // Marcus Upper Body — expressive, front-facing
 const POLL_MS       = 5_000
 const TMP           = '/tmp/videoworker'
 const UUID_RE       = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -320,97 +321,107 @@ function alignAnimatedScenes(
   return result as AnimatedSceneData[]
 }
 
-// ─── Runway video clip generation ─────────────────────────────────────────────
-// Submits a text-to-video task to Runway Gen-4 Turbo, polls until complete,
-// downloads the clip, re-uploads to Supabase (Runway URLs expire ~24h),
-// and returns the permanent Supabase public URL. Returns null on any failure
-// so the caller can fall back to the animated gradient background.
-async function generateRunwayClip(
-  prompt: string,
+// ─── HeyGen talking head generation ───────────────────────────────────────────
+// Submits a video generation task to HeyGen using our ElevenLabs audio URL.
+// HeyGen lip-syncs the chosen avatar to that audio, producing a full talking
+// head video. We re-upload to Supabase since HeyGen URLs expire. Returns null
+// on any failure — Remotion falls back to animated gradient background.
+async function generateHeyGenVideo(
+  audioUrl: string,
   packageId: string,
-  sceneIdx: number,
   jid: string,
 ): Promise<string | null> {
-  if (!RUNWAY_KEY) return null
+  if (!HEYGEN_KEY) return null
 
-  log('INFO', `  Runway [${sceneIdx}] submitting: "${prompt.slice(0, 60)}..."`, jid)
+  log('INFO', '  HeyGen: submitting talking head generation...', jid)
 
   try {
     const submitRes = await fetchWithTimeout(
-      'https://api.dev.runwayml.com/v1/text_to_video',
+      'https://api.heygen.com/v2/video/generate',
       {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${RUNWAY_KEY}`,
+          'X-Api-Key': HEYGEN_KEY,
           'Content-Type': 'application/json',
-          'X-Runway-Version': '2024-11-06',
         },
         body: JSON.stringify({
-          promptText: prompt,
-          ratio: '720:1280',  // 9:16 vertical
-          duration: 5,        // 5 seconds per clip
-          model: 'gen4_turbo',
+          video_inputs: [{
+            character: {
+              type: 'avatar',
+              avatar_id: HEYGEN_AVATAR,
+              avatar_style: 'normal',
+            },
+            voice: {
+              type: 'audio',
+              audio_url: audioUrl,
+            },
+            background: {
+              type: 'color',
+              value: '#0a0e27',
+            },
+          }],
+          dimension: { width: 1080, height: 1920 },
         }),
       },
       30_000,
     )
 
     if (!submitRes.ok) {
-      log('WARN', `  Runway [${sceneIdx}] submit ${submitRes.status}: ${await submitRes.text()}`, jid)
+      log('WARN', `  HeyGen submit ${submitRes.status}: ${await submitRes.text()}`, jid)
       return null
     }
 
-    const { id: taskId } = await submitRes.json() as { id: string }
-    log('INFO', `  Runway [${sceneIdx}] task ${taskId} polling...`, jid)
+    const submitData = await submitRes.json() as { data?: { video_id?: string } }
+    const videoId = submitData.data?.video_id
+    if (!videoId) { log('WARN', '  HeyGen: no video_id in response', jid); return null }
 
-    // Poll until SUCCEEDED or FAILED (max 2 minutes)
-    const deadline = Date.now() + 120_000
+    log('INFO', `  HeyGen video ${videoId} — polling...`, jid)
+
+    // Poll until completed or failed (max 10 minutes)
+    const deadline = Date.now() + 10 * 60 * 1000
     while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 5_000))
+      await new Promise(r => setTimeout(r, 10_000))
 
       const pollRes = await fetchWithTimeout(
-        `https://api.dev.runwayml.com/v1/tasks/${taskId}`,
-        { headers: { 'Authorization': `Bearer ${RUNWAY_KEY}`, 'X-Runway-Version': '2024-11-06' } },
+        `https://api.heygen.com/v1/video_status.get?video_id=${videoId}`,
+        { headers: { 'X-Api-Key': HEYGEN_KEY } },
         15_000,
       )
       if (!pollRes.ok) continue
 
-      const task = await pollRes.json() as { status: string; output?: string[] }
+      const pollData = await pollRes.json() as { data?: { status: string; video_url?: string } }
+      const status = pollData.data?.status
 
-      if (task.status === 'SUCCEEDED' && task.output?.[0]) {
-        // Download from Runway and re-upload to Supabase for a permanent URL
-        const clipPath = join(TMP, `clip_${packageId}_${sceneIdx}.mp4`)
-        const ok = await downloadFile(task.output[0], clipPath)
+      if (status === 'completed' && pollData.data?.video_url) {
+        log('INFO', `  HeyGen complete — downloading...`, jid)
+        const clipPath = join(TMP, `heygen_${packageId}.mp4`)
+        const ok = await downloadFile(pollData.data.video_url, clipPath)
         if (!ok) return null
 
         const clipBytes = readFileSync(clipPath)
         try { unlinkSync(clipPath) } catch { /* ignore */ }
 
-        const storageKey = `clips/${packageId}_${sceneIdx}.mp4`
+        const storageKey = `heygen/${packageId}.mp4`
         const { error } = await supabase.storage
           .from('videos')
           .upload(storageKey, clipBytes, { contentType: 'video/mp4', upsert: true })
 
-        if (error) {
-          log('WARN', `  Runway [${sceneIdx}] upload failed: ${error.message}`, jid)
-          return null
-        }
+        if (error) { log('WARN', `  HeyGen upload failed: ${error.message}`, jid); return null }
 
         const { data: { publicUrl } } = supabase.storage.from('videos').getPublicUrl(storageKey)
-        log('INFO', `  Runway [${sceneIdx}] done ✓`, jid)
+        log('INFO', '  HeyGen done ✓', jid)
         return publicUrl
       }
 
-      if (task.status === 'FAILED') {
-        log('WARN', `  Runway [${sceneIdx}] task failed`, jid)
-        return null
-      }
+      if (status === 'failed') { log('WARN', `  HeyGen video ${videoId} failed`, jid); return null }
+
+      log('INFO', `  HeyGen status: ${status}`, jid)
     }
 
-    log('WARN', `  Runway [${sceneIdx}] timed out after 2 min`, jid)
+    log('WARN', '  HeyGen timed out after 10 min', jid)
     return null
   } catch (err) {
-    log('WARN', `  Runway [${sceneIdx}] error: ${err instanceof Error ? err.message : String(err)}`, jid)
+    log('WARN', `  HeyGen error: ${err instanceof Error ? err.message : String(err)}`, jid)
     return null
   }
 }
@@ -557,43 +568,19 @@ async function processJob(job: VideoJob) {
     }
     log('INFO', `[3/8] Highlight words: ${highlightWords.join(', ') || '(none)'}`, jid)
 
-    // ── STEP 4: Generate animated scenes ──────────────────────────────────
-    log('INFO', '[4/8] Generating animated scenes...', jid)
-    const animatedSceneDefs = await breakIntoAnimatedScenes(job.script)
-    log('INFO', `[4/8] ${animatedSceneDefs.length} animated scenes generated`, jid)
-
-    // ── STEP 5: Align scenes to word timings ───────────────────────────────
-    log('INFO', '[5/8] Aligning scenes to voice timings...', jid)
-    const animatedScenes: AnimatedSceneData[] = alignAnimatedScenes(animatedSceneDefs, captions, duration)
-    log('INFO', `[5/8] Scenes aligned: ${animatedScenes.map(s => s.type).join(', ')}`, jid)
-
-    // ── STEP 5.5: Generate Runway background clips ─────────────────────────
-    // Run all Runway requests in parallel — typically 30-90s total.
-    // Each clip is 5s of AI-generated vertical video matching the scene content.
-    // Falls back to empty array (animated gradient) if RUNWAY_KEY is not set.
-    log('INFO', '[5.5/8] Generating Runway background clips...', jid)
-    let scenes: SceneData[] = []
-    if (RUNWAY_KEY) {
-      const runwayUrls = await Promise.all(
-        animatedSceneDefs.map((def, i) =>
-          generateRunwayClip(def.visualPrompt ?? def.voiceLine, id, i, jid)
-        )
-      )
-      scenes = animatedScenes.map((scene, i) => ({
-        videoUrl: runwayUrls[i] ?? null,
-        imageUrl: null,
-        startMs: scene.startMs,
-        durationMs: scene.durationMs,
-        motionStyle: 'quick-cut' as const,  // Runway clips have their own motion
-      }))
-      const hit = runwayUrls.filter(Boolean).length
-      log('INFO', `[5.5/8] ${hit}/${animatedSceneDefs.length} Runway clips generated`, jid)
+    // ── STEP 4: Generate HeyGen talking head ──────────────────────────────
+    // HeyGen lip-syncs Marcus avatar to our ElevenLabs audio. Takes 3-10 min.
+    // Falls back to animated gradient if HEYGEN_API_KEY not set or fails.
+    log('INFO', '[4/6] Generating HeyGen talking head...', jid)
+    const bgVideoUrl = await generateHeyGenVideo(job.audio_url, id, jid)
+    if (bgVideoUrl) {
+      log('INFO', '[4/6] HeyGen talking head ready ✓', jid)
     } else {
-      log('INFO', '[5.5/8] No RUNWAY_KEY — using animated gradient background', jid)
+      log('WARN', '[4/6] HeyGen unavailable — falling back to animated gradient', jid)
     }
 
-    // ── STEP 6: Bundle ─────────────────────────────────────────────────────
-    log('INFO', '[6/8] Bundling Remotion composition...', jid)
+    // ── STEP 5: Bundle ─────────────────────────────────────────────────────
+    log('INFO', '[5/6] Bundling Remotion composition...', jid)
     const serveUrl = await getBundle()
 
     await ensureBrowser()
@@ -603,16 +590,17 @@ async function processJob(job: VideoJob) {
       audioUrl: job.audio_url,
       captions,
       highlightWords,
-      scenes,
-      animatedScenes,
+      scenes: [] as SceneData[],
+      animatedScenes: [] as AnimatedSceneData[],
+      bgVideoUrl: bgVideoUrl ?? '',
       bgColor: '#0a0e27',
       durationInSeconds: duration,
     }
 
     const composition = await selectComposition({ serveUrl, id: 'TikTokVideo', inputProps })
 
-    // ── STEP 7: Render ─────────────────────────────────────────────────────
-    log('INFO', '[7/8] Rendering video...', jid)
+    // ── STEP 6: Render ─────────────────────────────────────────────────────
+    log('INFO', '[6/6] Rendering video...', jid)
     let lastLoggedPct = -1
     await renderMedia({
       composition: { ...composition, durationInFrames: Math.ceil(duration * 30) },
@@ -633,8 +621,8 @@ async function processJob(job: VideoJob) {
     process.stdout.write('\n')
     log('INFO', 'Render complete', jid)
 
-    // ── STEP 8: Upload ─────────────────────────────────────────────────────
-    log('INFO', '[8/8] Uploading video to Supabase...', jid)
+    // ── Upload ─────────────────────────────────────────────────────────────
+    log('INFO', 'Uploading final video to Supabase...', jid)
     const videoBytes = readFileSync(videoPath)
     const { error: uploadErr } = await retry(
       () => supabase.storage.from('videos').upload(`${id}.mp4`, videoBytes, { contentType: 'video/mp4', upsert: true }),

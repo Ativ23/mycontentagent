@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react'
-import { AbsoluteFill, Sequence, useVideoConfig } from 'remotion'
+import { AbsoluteFill, OffthreadVideo, Sequence, useVideoConfig } from 'remotion'
 import { Audio } from '@remotion/media'
 import { createTikTokStyleCaptions } from '@remotion/captions'
 import type { Caption } from '@remotion/captions'
@@ -52,6 +52,7 @@ export interface TikTokVideoProps {
   highlightWords: string[]     // Claude-picked words to show in red
   scenes: SceneData[]          // Stock footage scenes (used when animatedScenes is absent)
   animatedScenes?: AnimatedSceneData[]  // Motion graphics scenes (takes precedence if present)
+  bgVideoUrl?: string          // Full-duration muted background video (e.g. HeyGen talking head)
   bgColor: string              // Fallback background color if no visuals
   durationInSeconds: number    // Total video length
 }
@@ -68,6 +69,7 @@ export const TikTokVideo: React.FC<TikTokVideoProps> = ({
   highlightWords,
   scenes,
   animatedScenes,
+  bgVideoUrl,
   bgColor,
   durationInSeconds,
 }) => {
@@ -97,11 +99,20 @@ export const TikTokVideo: React.FC<TikTokVideoProps> = ({
 
       {/* ── LAYER 1: Background ──────────────────────────────────────────────
           Priority order:
-          1. scenes[] has URLs → Runway/stock video clips (best quality)
-          2. animatedScenes present, no clips → dark gradient fallback
-          3. Neither → solid bgColor
+          1. bgVideoUrl → HeyGen talking head (muted — audio plays separately)
+          2. scenes[] has URLs → stock/Runway clips
+          3. animatedScenes present → dark gradient
+          4. Neither → solid bgColor
       */}
-      {scenes.length > 0 ? (
+      {bgVideoUrl ? (
+        <AbsoluteFill style={{ overflow: 'hidden' }}>
+          <OffthreadVideo
+            src={bgVideoUrl}
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            muted
+          />
+        </AbsoluteFill>
+      ) : scenes.length > 0 ? (
         scenes.map((scene, i) => {
           const fromFrame = Math.round((scene.startMs / 1000) * fps)
           const durationInFrames = Math.max(1, Math.round((scene.durationMs / 1000) * fps))

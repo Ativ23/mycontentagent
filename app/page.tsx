@@ -52,7 +52,7 @@ export default function HomePage() {
             { icon: '◎', title: 'Voiceovers', desc: 'ElevenLabs AI voice with word timestamps' },
             { icon: '▶', title: 'Videos', desc: 'Auto-composed with captions and b-roll' },
           ].map((f) => (
-            <div key={f.title} className="bg-[#111118] border border-[#2a2a3a] rounded-xl p-4">
+            <div key={f.title} className="bg-[#111122] border border-violet-800/50 rounded-xl p-4">
               <p className="text-violet-400 text-lg mb-2">{f.icon}</p>
               <p className="text-white text-sm font-semibold mb-1">{f.title}</p>
               <p className="text-[#8884a8] text-xs leading-relaxed">{f.desc}</p>

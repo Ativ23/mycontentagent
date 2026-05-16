@@ -1,4 +1,19 @@
+import type { Metadata } from 'next'
 import Link from 'next/link'
+
+export const metadata: Metadata = {
+  title: 'Stacks Made Simple — AI Video Creator',
+  description: 'Generate scripts, voiceovers, and fully edited videos for any niche — finance, fitness, productivity, lifestyle, and more.',
+  openGraph: {
+    title: 'Stacks Made Simple — AI Video Creator',
+    description: 'Generate scripts, voiceovers, and fully edited videos for any niche — finance, fitness, productivity, lifestyle, and more.',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Stacks Made Simple — AI Video Creator',
+    description: 'Generate scripts, voiceovers, and fully edited videos for any niche — finance, fitness, productivity, lifestyle, and more.',
+  },
+}
 
 export default function HomePage() {
   return (
@@ -10,14 +25,13 @@ export default function HomePage() {
         </div>
 
         <h1 className="text-4xl font-black text-white mb-3 tracking-tight">
-          Stacks Made Simple
+          Turn any topic into a TikTok video in under 2 minutes
         </h1>
-        <p className="text-[#8884a8] text-lg mb-8 leading-relaxed">
-          AI-powered TikTok content for personal finance creators.
-          Generate scripts, voiceovers, and videos in minutes.
+        <p className="text-[#d4d0ef] text-xl mb-8 leading-relaxed">
+          Generate scripts, voiceovers, and fully edited videos for any niche — finance, fitness, productivity, lifestyle, and more.
         </p>
 
-        <div className="flex flex-col sm:flex-row gap-3 justify-center">
+        <div className="flex flex-col sm:flex-row gap-2 justify-center">
           <Link
             href="/generator"
             className="px-6 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold transition-colors"
@@ -32,7 +46,7 @@ export default function HomePage() {
           </Link>
         </div>
 
-        <div className="mt-16 grid grid-cols-3 gap-6 text-left">
+        <div className="mt-8 grid grid-cols-3 gap-4 text-left">
           {[
             { icon: '✦', title: 'AI Scripts', desc: 'High-retention TikTok scripts in seconds' },
             { icon: '◎', title: 'Voiceovers', desc: 'ElevenLabs AI voice with word timestamps' },
@@ -46,9 +60,10 @@ export default function HomePage() {
           ))}
         </div>
 
-        <div className="mt-12 flex gap-6 justify-center text-xs text-[#555566]">
+        <div className="mt-10 flex gap-6 justify-center text-xs text-[#555566]">
           <Link href="/terms" className="hover:text-[#8884a8] transition-colors">Terms of Service</Link>
           <Link href="/privacy" className="hover:text-[#8884a8] transition-colors">Privacy Policy</Link>
+          <Link href="/contact" className="hover:text-[#8884a8] transition-colors">Contact</Link>
         </div>
       </div>
     </div>

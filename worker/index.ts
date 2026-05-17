@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js'
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
 import Anthropic from '@anthropic-ai/sdk'
+import { GoogleGenAI } from '@google/genai'
 import { bundle } from '@remotion/bundler'
 import { renderMedia, selectComposition, ensureBrowser } from '@remotion/renderer'
 import type { Caption } from '@remotion/captions'
@@ -13,8 +14,7 @@ import { sendAlert } from '../lib/alerts'
 const SUPABASE_URL  = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const SUPABASE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY!
 const PEXELS_KEY    = process.env.PEXELS_API_KEY ?? ''
-const HEYGEN_KEY    = process.env.HEYGEN_API_KEY ?? ''
-const HEYGEN_AVATAR = 'Marcus_expressive_2024120201'  // Marcus Upper Body — expressive, front-facing
+const GOOGLE_AI_KEY = process.env.GOOGLE_AI_API_KEY ?? ''
 const POLL_MS       = 5_000
 const TMP           = '/tmp/videoworker'
 const UUID_RE       = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -321,107 +321,74 @@ function alignAnimatedScenes(
   return result as AnimatedSceneData[]
 }
 
-// ─── HeyGen talking head generation ───────────────────────────────────────────
-// Submits a video generation task to HeyGen using our ElevenLabs audio URL.
-// HeyGen lip-syncs the chosen avatar to that audio, producing a full talking
-// head video. We re-upload to Supabase since HeyGen URLs expire. Returns null
-// on any failure — Remotion falls back to animated gradient background.
-async function generateHeyGenVideo(
-  audioUrl: string,
+// ─── Veo 3.1 clip generation ──────────────────────────────────────────────────
+// Generates a single 8-second 9:16 AI video clip via Google Veo 3.1 Lite.
+// Uploads to Supabase (Veo URIs are temporary) and returns a permanent URL.
+// Returns null on any failure — caller falls back to animated gradient.
+const veoClient = GOOGLE_AI_KEY ? new GoogleGenAI({ apiKey: GOOGLE_AI_KEY }) : null
+
+async function generateVeoClip(
+  prompt: string,
   packageId: string,
+  sceneIdx: number,
   jid: string,
 ): Promise<string | null> {
-  if (!HEYGEN_KEY) return null
+  if (!veoClient) return null
 
-  log('INFO', '  HeyGen: submitting talking head generation...', jid)
+  log('INFO', `  Veo [${sceneIdx}] "${prompt.slice(0, 60)}..."`, jid)
 
   try {
-    const submitRes = await fetchWithTimeout(
-      'https://api.heygen.com/v2/video/generate',
-      {
-        method: 'POST',
-        headers: {
-          'X-Api-Key': HEYGEN_KEY,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          video_inputs: [{
-            character: {
-              type: 'avatar',
-              avatar_id: HEYGEN_AVATAR,
-              avatar_style: 'normal',
-            },
-            voice: {
-              type: 'audio',
-              audio_url: audioUrl,
-            },
-            background: {
-              type: 'color',
-              value: '#0a0e27',
-            },
-          }],
-          dimension: { width: 1080, height: 1920 },
-        }),
+    let operation = await veoClient.models.generateVideos({
+      model: 'veo-3.1-lite-generate-preview',
+      prompt,
+      config: {
+        aspectRatio: '9:16',
+        durationSeconds: 8,
+        numberOfVideos: 1,
       },
-      30_000,
-    )
+    })
 
-    if (!submitRes.ok) {
-      log('WARN', `  HeyGen submit ${submitRes.status}: ${await submitRes.text()}`, jid)
-      return null
-    }
-
-    const submitData = await submitRes.json() as { data?: { video_id?: string } }
-    const videoId = submitData.data?.video_id
-    if (!videoId) { log('WARN', '  HeyGen: no video_id in response', jid); return null }
-
-    log('INFO', `  HeyGen video ${videoId} — polling...`, jid)
-
-    // Poll until completed or failed (max 10 minutes)
-    const deadline = Date.now() + 10 * 60 * 1000
-    while (Date.now() < deadline) {
+    // Poll until complete (max 5 minutes)
+    const deadline = Date.now() + 5 * 60 * 1000
+    while (!operation.done && Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 10_000))
-
-      const pollRes = await fetchWithTimeout(
-        `https://api.heygen.com/v1/video_status.get?video_id=${videoId}`,
-        { headers: { 'X-Api-Key': HEYGEN_KEY } },
-        15_000,
-      )
-      if (!pollRes.ok) continue
-
-      const pollData = await pollRes.json() as { data?: { status: string; video_url?: string } }
-      const status = pollData.data?.status
-
-      if (status === 'completed' && pollData.data?.video_url) {
-        log('INFO', `  HeyGen complete — downloading...`, jid)
-        const clipPath = join(TMP, `heygen_${packageId}.mp4`)
-        const ok = await downloadFile(pollData.data.video_url, clipPath)
-        if (!ok) return null
-
-        const clipBytes = readFileSync(clipPath)
-        try { unlinkSync(clipPath) } catch { /* ignore */ }
-
-        const storageKey = `heygen/${packageId}.mp4`
-        const { error } = await supabase.storage
-          .from('videos')
-          .upload(storageKey, clipBytes, { contentType: 'video/mp4', upsert: true })
-
-        if (error) { log('WARN', `  HeyGen upload failed: ${error.message}`, jid); return null }
-
-        const { data: { publicUrl } } = supabase.storage.from('videos').getPublicUrl(storageKey)
-        log('INFO', '  HeyGen done ✓', jid)
-        return publicUrl
-      }
-
-      if (status === 'failed') { log('WARN', `  HeyGen video ${videoId} failed`, jid); return null }
-
-      log('INFO', `  HeyGen status: ${status}`, jid)
+      operation = await veoClient.operations.getVideosOperation({ operation })
     }
 
-    log('WARN', '  HeyGen timed out after 10 min', jid)
-    return null
+    if (!operation.done) { log('WARN', `  Veo [${sceneIdx}] timed out`, jid); return null }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sample = (operation as any).response?.generatedSamples?.[0]
+    if (!sample?.video) { log('WARN', `  Veo [${sceneIdx}] no video in response`, jid); return null }
+
+    // Video comes back as a URI — download it with API key auth
+    let videoBuffer: Buffer | null = null
+    if (sample.video.uri) {
+      const dlRes = await fetchWithTimeout(
+        sample.video.uri,
+        { headers: { 'x-goog-api-key': GOOGLE_AI_KEY } },
+        60_000,
+      )
+      if (!dlRes.ok) { log('WARN', `  Veo [${sceneIdx}] download failed ${dlRes.status}`, jid); return null }
+      videoBuffer = Buffer.from(await dlRes.arrayBuffer())
+    } else if (sample.video.bytesBase64Encoded) {
+      videoBuffer = Buffer.from(sample.video.bytesBase64Encoded, 'base64')
+    }
+
+    if (!videoBuffer) { log('WARN', `  Veo [${sceneIdx}] no video data`, jid); return null }
+
+    const storageKey = `veo/${packageId}_${sceneIdx}.mp4`
+    const { error } = await supabase.storage
+      .from('videos')
+      .upload(storageKey, videoBuffer, { contentType: 'video/mp4', upsert: true })
+
+    if (error) { log('WARN', `  Veo [${sceneIdx}] upload failed: ${error.message}`, jid); return null }
+
+    const { data: { publicUrl } } = supabase.storage.from('videos').getPublicUrl(storageKey)
+    log('INFO', `  Veo [${sceneIdx}] done ✓`, jid)
+    return publicUrl
   } catch (err) {
-    log('WARN', `  HeyGen error: ${err instanceof Error ? err.message : String(err)}`, jid)
+    log('WARN', `  Veo [${sceneIdx}] error: ${err instanceof Error ? err.message : String(err)}`, jid)
     return null
   }
 }
@@ -568,19 +535,37 @@ async function processJob(job: VideoJob) {
     }
     log('INFO', `[3/8] Highlight words: ${highlightWords.join(', ') || '(none)'}`, jid)
 
-    // ── STEP 4: Generate HeyGen talking head ──────────────────────────────
-    // HeyGen lip-syncs Marcus avatar to our ElevenLabs audio. Takes 3-10 min.
-    // Falls back to animated gradient if HEYGEN_API_KEY not set or fails.
-    log('INFO', '[4/6] Generating HeyGen talking head...', jid)
-    const bgVideoUrl = await generateHeyGenVideo(job.audio_url, id, jid)
-    if (bgVideoUrl) {
-      log('INFO', '[4/6] HeyGen talking head ready ✓', jid)
-    } else {
-      log('WARN', '[4/6] HeyGen unavailable — falling back to animated gradient', jid)
-    }
+    // ── STEP 4: Break script into visual scenes ───────────────────────────
+    // Claude generates a short cinematic prompt for each script segment.
+    // These prompts drive Veo 3.1 to produce matching AI video clips.
+    log('INFO', '[4/7] Generating visual scene prompts...', jid)
+    const sceneDefs = await breakIntoScenes(job.script, duration)
+    log('INFO', `[4/7] ${sceneDefs.length} scenes: ${sceneDefs.map(s => s.visualKeywords.join('+')).join(' | ')}`, jid)
 
-    // ── STEP 5: Bundle ─────────────────────────────────────────────────────
-    log('INFO', '[5/6] Bundling Remotion composition...', jid)
+    // ── STEP 5: Generate Veo 3.1 clips in parallel ────────────────────────
+    // Each scene gets its own 8-second 9:16 AI video clip from Google Veo.
+    // All clips generate in parallel — total wait ~60-90s for the batch.
+    // Falls back to animated gradient per-clip if Veo fails for that scene.
+    log('INFO', '[5/7] Generating Veo 3.1 clips...', jid)
+    const timings = distributeSceneTiming(sceneDefs, duration)
+    const veoUrls = await Promise.all(
+      sceneDefs.map((scene, i) => {
+        const prompt = `${scene.visualKeywords.join(', ')}, cinematic vertical 9:16 video, ${scene.motionStyle} camera, no text no logos, high quality`
+        return generateVeoClip(prompt, id, i, jid)
+      })
+    )
+    const scenes: SceneData[] = sceneDefs.map((scene, i) => ({
+      videoUrl: veoUrls[i] ?? null,
+      imageUrl: null,
+      startMs: timings[i].startMs,
+      durationMs: timings[i].durationMs,
+      motionStyle: scene.motionStyle,
+    }))
+    const hit = veoUrls.filter(Boolean).length
+    log('INFO', `[5/7] ${hit}/${sceneDefs.length} Veo clips generated`, jid)
+
+    // ── STEP 6: Bundle ─────────────────────────────────────────────────────
+    log('INFO', '[6/7] Bundling Remotion composition...', jid)
     const serveUrl = await getBundle()
 
     await ensureBrowser()
@@ -590,17 +575,17 @@ async function processJob(job: VideoJob) {
       audioUrl: job.audio_url,
       captions,
       highlightWords,
-      scenes: [] as SceneData[],
+      scenes,
       animatedScenes: [] as AnimatedSceneData[],
-      bgVideoUrl: bgVideoUrl ?? '',
+      bgVideoUrl: '',
       bgColor: '#0a0e27',
       durationInSeconds: duration,
     }
 
     const composition = await selectComposition({ serveUrl, id: 'TikTokVideo', inputProps })
 
-    // ── STEP 6: Render ─────────────────────────────────────────────────────
-    log('INFO', '[6/6] Rendering video...', jid)
+    // ── STEP 7: Render ─────────────────────────────────────────────────────
+    log('INFO', '[7/7] Rendering video...', jid)
     let lastLoggedPct = -1
     await renderMedia({
       composition: { ...composition, durationInFrames: Math.ceil(duration * 30) },

@@ -126,30 +126,44 @@ async function downloadFile(url: string, dest: string): Promise<boolean> {
 
 // ─── Scene breakdown ───────────────────────────────────────────────────────────
 async function breakIntoScenes(script: string, durationInSeconds: number): Promise<SceneDef[]> {
-  if (!anthropic) return [{ voiceLine: script, visualKeywords: ['nature landscape'], motionStyle: 'slow-zoom' }]
+  if (!anthropic) return [{ voiceLine: script, visualKeywords: ['person walking city', 'urban lifestyle', 'city street', 'people walking'], motionStyle: 'slow-zoom' }]
 
   try {
     const res = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 700,
+      max_tokens: 1200,
       messages: [{
         role: 'user',
-        content: `Break this TikTok script into 4-6 visual scenes for video production.
+        content: `You are a video production director building a shot list for a TikTok faceless video. Match every line of this script to a Pexels stock footage clip.
 
-Script:
+SCRIPT:
 """
 ${script}
 """
 
-Rules:
-- Cover the ENTIRE script in order. Every line must be in a scene.
-- voiceLine: copy the exact words from the script for each scene
-- visualKeywords: 2 specific search terms for stock VIDEO (e.g. "barbell gym", "city street crowd")
-- motionStyle: slow-zoom | pan-left | pan-right | punch-in | quick-cut
-  Use punch-in for the opening hook. slow-zoom for emotional moments. pan for transitions.
+PEXELS LIBRARY — what exists vs what doesn't:
+✓ WORKS: people doing everyday things (eating, sleeping, working out, cooking, driving, scrolling phone)
+✓ WORKS: real environments (gym, bedroom, kitchen, office, city street, restaurant, store)
+✓ WORKS: products and objects close-up (food, supplements, money, phone, laptop, gadgets)
+✓ WORKS: emotional moments (stressed person, confident walk, tired morning, excited reaction)
+✗ AVOID: abstract concepts, diagrams, microscopic views, metaphors, anything not physically filmable
 
-Return ONLY a JSON array, nothing else:
-[{"voiceLine":"...","visualKeywords":["...","..."],"motionStyle":"slow-zoom"}]`,
+RULES:
+1. Split into 5-7 scenes covering the ENTIRE script in order
+2. voiceLine: exact words from the script, nothing added or removed
+3. visualKeywords: exactly 4 terms, ordered MOST SPECIFIC → MOST GENERAL:
+   - [0] The precise moment on screen: subject + action + setting (e.g. "man eating chicken rice meal prep")
+   - [1] Subject in a related activity (e.g. "athlete post workout nutrition")
+   - [2] Broader setting or emotion (e.g. "fit person kitchen healthy food")
+   - [3] Guaranteed broad fallback — single noun that always returns results (e.g. "gym")
+4. motionStyle:
+   - punch-in: hook line, shocking stat, dramatic reveal
+   - slow-zoom: emotional insight, mindset shift, resolution
+   - pan-left / pan-right: comparisons, transitions between ideas
+   - quick-cut: high-energy, list of items, rapid fire facts
+
+Return ONLY a JSON array, no other text:
+[{"voiceLine":"...","visualKeywords":["precise moment","related activity","broad setting","single noun fallback"],"motionStyle":"punch-in"}]`,
       }],
     })
 
@@ -159,7 +173,7 @@ Return ONLY a JSON array, nothing else:
     return parsed
   } catch (e) {
     console.warn('Scene breakdown failed, using single scene:', e)
-    return [{ voiceLine: script, visualKeywords: ['cinematic nature'], motionStyle: 'slow-zoom' }]
+    return [{ voiceLine: script, visualKeywords: ['person working desk', 'office lifestyle', 'business professional', 'office'], motionStyle: 'slow-zoom' }]
   }
 }
 
@@ -397,11 +411,14 @@ async function generateVeoClip(
 async function searchPexelsVideo(keywords: string[]): Promise<string | null> {
   if (!PEXELS_KEY) return null
 
+  type PexelsFile = { file_type: string; quality: string; width: number; height: number; link: string }
+  type PexelsVideo = { video_files: PexelsFile[] }
+
   for (const query of keywords) {
     try {
       const res = await retry(
         () => fetchWithTimeout(
-          `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=5`,
+          `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=15&sort=popular`,
           { headers: { Authorization: PEXELS_KEY } },
           10_000
         ),
@@ -410,18 +427,22 @@ async function searchPexelsVideo(keywords: string[]): Promise<string | null> {
       )
       if (!res.ok) continue
 
-      const data = await res.json() as { videos?: Array<{ video_files: Array<{ file_type: string; quality: string; width: number; height: number; link: string }> }> }
+      const data = await res.json() as { videos?: PexelsVideo[] }
       const videos = data.videos ?? []
       if (!videos.length) continue
 
-      const video = videos[Math.floor(Math.random() * videos.length)]
-      const mp4Files = (video.video_files ?? []).filter(f => f.file_type === 'video/mp4')
-      const portraitFiles = mp4Files.filter(f => f.height && f.width && f.height > f.width)
-      const selected = portraitFiles[0] ?? mp4Files.find(f => f.quality === 'hd') ?? mp4Files[0]
-
-      if (selected?.link) {
-        log('INFO', `  Video found for "${query}": ${selected.width}x${selected.height}`)
-        return selected.link
+      // Try each video in relevance order — return the first with a usable portrait clip
+      for (const video of videos) {
+        const mp4Files = (video.video_files ?? []).filter(f => f.file_type === 'video/mp4')
+        // Portrait + minimum 720p height, sorted highest resolution first
+        const portraitHD = mp4Files
+          .filter(f => f.height && f.width && f.height > f.width && f.height >= 720)
+          .sort((a, b) => (b.height ?? 0) - (a.height ?? 0))
+        const selected = portraitHD[0] ?? mp4Files.find(f => f.quality === 'hd') ?? null
+        if (selected?.link) {
+          log('INFO', `  Pexels clip for "${query}": ${selected.width}x${selected.height}`)
+          return selected.link
+        }
       }
     } catch (err) {
       log('WARN', `searchPexelsVideo error for "${query}": ${err instanceof Error ? err.message : String(err)}`)
@@ -429,7 +450,7 @@ async function searchPexelsVideo(keywords: string[]): Promise<string | null> {
     }
   }
 
-  log('WARN', `No video found for keywords: ${keywords.join(', ')}`)
+  log('WARN', `No Pexels video for: ${keywords.join(' → ')}`)
   return null
 }
 

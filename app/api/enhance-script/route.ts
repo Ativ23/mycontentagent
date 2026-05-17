@@ -49,7 +49,7 @@ Return ONLY valid JSON:
   "script": "original script here if all passed"
 }
 
-If ANY check fails: set improved=true and put a fully rewritten script in "script" that passes all 4 checks. Keep the same topic and verifiable facts. Rules: sentences 5–10 words max, 2+ pattern interrupts, 2+ emotional triggers, comment-based CTA ("Drop a 1"), no filler, no slang, confident direct tone, 110–130 words total.`,
+If ANY check fails: set improved=true and put a fully rewritten script in "script" that passes all 4 checks. Keep the same topic and verifiable facts. Rules: sentences 5–10 words max, 2+ pattern interrupts, 2+ emotional triggers, comment-based CTA ("Drop a 1 if this helped", "Save this") — never promise to send or reply, no filler, no slang, confident direct tone, 110–130 words total.`,
     }],
   })
 

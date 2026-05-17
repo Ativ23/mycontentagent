@@ -26,7 +26,7 @@ HIGH-RETENTION FORMAT RULES — maintain these in every edit:
 - Pattern interrupt every 2-3 lines: a short question, a reversal, a single sharp word
 - Emotional triggers: urgency, curiosity, ego, or validation woven in naturally
 - Specific numbers and verifiable facts only — never invent statistics or citations
-- CTA must be comment-based ("Drop a 1", "Comment [word]") — not "follow me"
+- CTA must be comment-based ("Drop a 1 if this helped", "Save this", "Comment [word] below") — never "follow me", never "I'll send you" or "I'll reply" — no promises of a personal response
 - Tone: confident, slightly aggressive, high energy — sounds like a real person
 
 Current script:

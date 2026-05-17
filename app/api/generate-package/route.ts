@@ -20,7 +20,7 @@ NICHE RULES:
 - Name real platforms: Marcus by Goldman Sachs, YNAB, Fidelity, Robinhood, Discover it
 - Never vague: "save more" is dead. "Automate $50/week to a HYSA" is alive
 - No guaranteed income or returns — speak like a knowledgeable friend, not a financial advisor
-- CTA: comment-based drives MORE reach than "follow me" — use "drop a 1 if you want the full breakdown"
+- CTA: comment-based drives MORE reach than "follow me" — use "drop a 1 if this hit different" or "save this"
 
 VIRAL FORMATS THAT WORK:
 - Confession + fix: "I spent 3 years thinking I was bad with money. Turns out I was only doing ONE thing wrong."
@@ -32,7 +32,7 @@ NICHE RULES:
 - Specific beats vague: "lost 11 lbs in 6 weeks" > "lost weight", "30g protein at breakfast" > "eat more protein"
 - Name real products, apps, or workouts — not generic "a supplement" or "some exercises"
 - Transformation angles: week 1 vs week 6, before/after a specific protocol change
-- CTA: "comment your goal and I'll reply with the exact plan" drives massive engagement
+- CTA: "comment your goal below" or "drop a 1 if you needed this" — drives engagement without promising replies
 
 VIRAL FORMATS THAT WORK:
 - "I've been doing this ONE thing for 30 days and here's what changed" (specific habit reveal)
@@ -80,7 +80,7 @@ NICHE RULES:
 - Make viewers feel SEEN before delivering the insight — start from their pain point
 - High-emotion and validation content gets shared more than advice
 - Red flags, green flags, attachment styles, "this is why you keep attracting [X]" all go viral
-- CTA: "comment your situation and I'll tell you what I see" drives massive replies
+- CTA: "comment your situation below" or "drop a 1 if this is you" — drives replies without promising a personal response
 
 VIRAL FORMATS THAT WORK:
 - "I used to think [X about relationships] until I realized this." (mindset shift reveal)
@@ -92,7 +92,7 @@ NICHE RULES:
 - 3-5 steps MAX — any longer and completion rate drops below 50%
 - Specific and visual: "1 cup arborio rice" not "some rice", "caramelized until deep amber" not "cooked"
 - Trending formats: viral food recreations, 5-ingredient meals, $5 meals that taste like $50
-- CTA: "comment 'recipe' and I'll send it to you" drives DMs and comment count simultaneously
+- CTA: "comment 'recipe' if you want this" or "save this before you forget" — drives engagement without promising DMs
 
 VIRAL FORMATS THAT WORK:
 - "I made [viral restaurant dish] at home for $8. Here's exactly how." (viral recreation)
@@ -165,7 +165,7 @@ STRUCTURE:
 2. PATTERN INTERRUPT (3-6s): Immediately challenge or destabilize the viewer's assumption. One short punch.
 3. BODY (6-38s): Short punchy sentences — 5 to 10 words max each. Add a pattern interrupt every 2-3 lines (a question, a reversal, a single word like "Stop." or "Wait."). 3 fast beats of value.
 4. TWIST (38-43s): One line that reframes everything — the payoff the viewer stayed for.
-5. CTA (43-48s): Comment-based CTA only ("Drop a 1", "Comment [word]") — NOT "follow me". Feels natural, not scripted.
+5. CTA (43-48s): Comment-based CTA only ("Drop a 1 if this helped", "Save this", "Comment [word] below") — NOT "follow me", NOT "I'll send you" or "I'll reply". Never promise a personal response. Feels natural, not scripted.
 
 SENTENCE RULES — non-negotiable:
 - Every sentence: 5 to 10 words MAX. No exceptions.

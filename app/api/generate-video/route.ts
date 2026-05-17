@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getAuthUser } from '@/lib/supabase-server'
 import { getSupabaseAdmin } from '@/lib/supabase'
 
 export const runtime = 'nodejs'
 
 export async function POST(req: NextRequest) {
+  const user = await getAuthUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
   try {
     const body = await req.text()
     let packageId: string, script: string, audioUrl: string, bgVideoUrl: string | undefined
@@ -32,6 +36,7 @@ export async function POST(req: NextRequest) {
         script,
         audio_url: audioUrl,
         bg_video_url: bgVideoUrl ?? null,
+        user_id: user.id,
       })
       .select('id')
       .single()

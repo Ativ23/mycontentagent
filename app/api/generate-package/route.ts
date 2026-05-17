@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { anthropic } from '@/lib/anthropic'
+import { getAuthUser } from '@/lib/supabase-server'
 
 const NICHE_RULES: Record<string, string> = {
   'Beauty & Skincare': `
@@ -125,6 +126,9 @@ VIRAL FORMATS THAT WORK:
 }
 
 export async function POST(req: NextRequest) {
+  const user = await getAuthUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
   try {
   const { idea, niche, tone } = await req.json()
 

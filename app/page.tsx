@@ -33,16 +33,16 @@ export default function HomePage() {
 
         <div className="flex flex-col sm:flex-row gap-2 justify-center">
           <Link
-            href="/generator"
+            href="/auth"
             className="px-6 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold transition-colors"
           >
-            Open Generator
+            Get Started Free
           </Link>
           <Link
-            href="/library"
+            href="/auth"
             className="px-6 py-3 rounded-xl border border-[#2a2a3a] text-[#8884a8] hover:text-white hover:border-violet-600 font-medium transition-colors"
           >
-            View Library
+            Sign In
           </Link>
         </div>
 

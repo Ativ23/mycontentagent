@@ -125,15 +125,12 @@ async function downloadFile(url: string, dest: string): Promise<boolean> {
 }
 
 // ─── Scene breakdown ───────────────────────────────────────────────────────────
-// Ask Claude Haiku to split the script into scenes.
-// We use Haiku (not Sonnet) here because it's 5x faster and this is a
-// simple extraction task, not creative writing.
 async function breakIntoScenes(script: string, durationInSeconds: number): Promise<SceneDef[]> {
   if (!anthropic) return [{ voiceLine: script, visualKeywords: ['nature landscape'], motionStyle: 'slow-zoom' }]
 
   try {
     const res = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-4-6',
       max_tokens: 700,
       messages: [{
         role: 'user',

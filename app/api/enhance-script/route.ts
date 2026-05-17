@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
   }
 
   const message = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-opus-4-7',
     max_tokens: 1024,
     messages: [{
       role: 'user',

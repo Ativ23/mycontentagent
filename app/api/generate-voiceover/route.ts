@@ -84,30 +84,31 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// Voice settings tuned per niche.
 // stability: 0 = expressive/varied, 1 = consistent/flat
 // style: 0 = neutral, 1 = maximum character/emotion
 // similarity_boost: how closely to stick to the voice's original character
-const NICHE_VOICE_SETTINGS: Record<string, { stability: number; similarity_boost: number; style: number }> = {
-  'Fitness & Health':   { stability: 0.30, similarity_boost: 0.85, style: 0.75 }, // aggressive, punchy, high energy
-  'Personal Finance':   { stability: 0.70, similarity_boost: 0.85, style: 0.25 }, // calm, authoritative, trustworthy
-  'Tech & Gadgets':     { stability: 0.55, similarity_boost: 0.80, style: 0.45 }, // sharp, curious, informative
-  'Beauty & Skincare':  { stability: 0.60, similarity_boost: 0.80, style: 0.50 }, // warm, friendly, smooth
-  'Fashion & Style':    { stability: 0.40, similarity_boost: 0.85, style: 0.65 }, // vibrant, confident, trendy
-  'Food & Recipes':     { stability: 0.50, similarity_boost: 0.80, style: 0.55 }, // enthusiastic, appetizing
-  'Relationships':      { stability: 0.45, similarity_boost: 0.85, style: 0.60 }, // emotional, relatable, warm
-  'Home & Kitchen':     { stability: 0.60, similarity_boost: 0.80, style: 0.40 }, // helpful, clear, friendly
-  'Pet Content':        { stability: 0.50, similarity_boost: 0.80, style: 0.60 }, // excited, warm, playful
-  'Digital Products':   { stability: 0.65, similarity_boost: 0.80, style: 0.35 }, // confident, results-focused
+// use_speaker_boost: adds clarity and presence — always true for TikTok
+// speed: 1.0 = normal, 1.1 = slightly faster (higher energy niches)
+const NICHE_VOICE_SETTINGS: Record<string, { stability: number; similarity_boost: number; style: number; use_speaker_boost: boolean; speed: number }> = {
+  'Fitness & Health':   { stability: 0.25, similarity_boost: 0.88, style: 0.80, use_speaker_boost: true, speed: 1.05 },
+  'Personal Finance':   { stability: 0.68, similarity_boost: 0.88, style: 0.20, use_speaker_boost: true, speed: 1.00 },
+  'Tech & Gadgets':     { stability: 0.50, similarity_boost: 0.82, style: 0.45, use_speaker_boost: true, speed: 1.02 },
+  'Beauty & Skincare':  { stability: 0.55, similarity_boost: 0.82, style: 0.52, use_speaker_boost: true, speed: 1.00 },
+  'Fashion & Style':    { stability: 0.35, similarity_boost: 0.88, style: 0.68, use_speaker_boost: true, speed: 1.03 },
+  'Food & Recipes':     { stability: 0.45, similarity_boost: 0.82, style: 0.58, use_speaker_boost: true, speed: 1.00 },
+  'Relationships':      { stability: 0.40, similarity_boost: 0.88, style: 0.65, use_speaker_boost: true, speed: 1.00 },
+  'Home & Kitchen':     { stability: 0.58, similarity_boost: 0.82, style: 0.40, use_speaker_boost: true, speed: 1.00 },
+  'Pet Content':        { stability: 0.45, similarity_boost: 0.82, style: 0.62, use_speaker_boost: true, speed: 1.02 },
+  'Digital Products':   { stability: 0.62, similarity_boost: 0.82, style: 0.35, use_speaker_boost: true, speed: 1.00 },
 }
-const DEFAULT_VOICE_SETTINGS = { stability: 0.50, similarity_boost: 0.75, style: 0.45 }
+const DEFAULT_VOICE_SETTINGS = { stability: 0.50, similarity_boost: 0.80, style: 0.45, use_speaker_boost: true, speed: 1.00 }
 
 async function handleVoiceover(req: NextRequest) {
   const { packageId, script, voiceId, voiceSettings: reqVoiceSettings } = await req.json() as {
     packageId: string
     script: string
     voiceId?: string
-    voiceSettings?: { stability: number; similarity_boost: number; style: number; use_speaker_boost?: boolean }
+    voiceSettings?: { stability: number; similarity_boost: number; style: number; use_speaker_boost?: boolean; speed?: number }
   }
 
   if (!packageId || !script) {
@@ -162,7 +163,7 @@ async function handleVoiceover(req: NextRequest) {
         headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: prepareForTTS(script),
-          model_id: 'eleven_turbo_v2_5',
+          model_id: 'eleven_multilingual_v2',
           voice_settings: voiceSettings,
         }),
         signal: controller.signal,

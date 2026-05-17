@@ -57,44 +57,44 @@ export async function selectVoice(
     description: v.description ?? '',
   }))
 
+  // Only show premade/professional voices — clutter-free, higher quality pool
+  const filteredList = voiceList.filter(v =>
+    v.category === 'premade' || v.category === 'professional' || v.category === 'cloned'
+  )
+  const castingPool = (filteredList.length >= 4 ? filteredList : voiceList).slice(0, 30)
+
   const message = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
+    model: 'claude-opus-4-7',
     max_tokens: 400,
     messages: [{
       role: 'user',
-      content: `You are a voice casting director for TikTok videos. Analyze this script and select the best voice.
+      content: `You are a senior TikTok content producer casting the voice for a short-form video. You have cast hundreds of viral videos and know exactly which voice energy drives retention and shares.
 
-SCRIPT:
+SCRIPT (read every word — the voice must match the energy of this exact copy):
 ${script}
 
 NICHE: ${niche}
 TONE: ${tone}
 
+CASTING CRITERIA — in priority order:
+1. ENERGY MATCH: The hook (first 3 seconds) must feel native to this niche. Finance = calm authority. Fitness = intense urgency. Relationships = emotional rawness. Beauty = warm confidence. Tech = sharp curiosity.
+2. GENDER & AGE FIT: Match the voice demographic to the target audience. Finance/Tech → male or neutral authority works. Beauty/Relationships → female or warm male works.
+3. AVOID: robotic, over-produced, or "text-to-speech sounding" voices. Choose the most human-sounding option.
+4. SETTINGS: Dial for maximum naturalness. Low stability = expressive but inconsistent. High style = character but can sound performative.
+
 AVAILABLE VOICES:
-${JSON.stringify(voiceList, null, 2)}
-
-Consider:
-- Emotional tone: is this motivational, educational, dramatic, funny, luxury, scary, sales-focused?
-- Pacing: fast/energetic vs slow/deliberate?
-- Audience: young adults, men, women, general?
-- Hook intensity: aggressive opener vs soft?
-
-Voice settings guide:
-- stability: 0=expressive/varied, 1=consistent/flat
-- similarity_boost: how closely to stick to the voice character (0.7–0.9 typical)
-- style: 0=neutral, 1=maximum character/emotion
-- use_speaker_boost: true for clarity, false if already clear
+${JSON.stringify(castingPool, null, 2)}
 
 Respond ONLY with valid JSON, no other text:
 {
   "selectedVoiceId": "<exact id from list>",
   "selectedVoiceName": "<exact name from list>",
-  "reason": "<one sentence why this voice fits>",
+  "reason": "<one sentence: what specifically about this voice fits this script>",
   "voiceSettings": {
     "stability": <0.0-1.0>,
-    "similarity_boost": <0.0-1.0>,
+    "similarity_boost": <0.75-0.92>,
     "style": <0.0-1.0>,
-    "use_speaker_boost": <true|false>
+    "use_speaker_boost": true
   }
 }`,
     }],

@@ -542,27 +542,30 @@ async function processJob(job: VideoJob) {
     const sceneDefs = await breakIntoScenes(job.script, duration)
     log('INFO', `[4/7] ${sceneDefs.length} scenes: ${sceneDefs.map(s => s.visualKeywords.join('+')).join(' | ')}`, jid)
 
-    // ── STEP 5: Generate Veo 3.1 clips in parallel ────────────────────────
-    // Each scene gets its own 8-second 9:16 AI video clip from Google Veo.
-    // All clips generate in parallel — total wait ~60-90s for the batch.
-    // Falls back to animated gradient per-clip if Veo fails for that scene.
-    log('INFO', '[5/7] Generating Veo 3.1 clips...', jid)
+    // ── STEP 5: Generate clips — Veo 3.1 → Pexels video → Pexels image ──────
+    // Try AI video first, fall back to stock footage, then static image.
+    // All scenes run in parallel for speed.
+    log('INFO', '[5/7] Generating clips (Veo → Pexels fallback)...', jid)
     const timings = distributeSceneTiming(sceneDefs, duration)
-    const veoUrls = await Promise.all(
-      sceneDefs.map((scene, i) => {
-        const prompt = `${scene.visualKeywords.join(', ')}, cinematic vertical 9:16 video, ${scene.motionStyle} camera, no text no logos, high quality`
-        return generateVeoClip(prompt, id, i, jid)
+    const scenes: SceneData[] = await Promise.all(
+      sceneDefs.map(async (scene, i) => {
+        const veoPrompt = `${scene.visualKeywords.join(', ')}, cinematic vertical 9:16 video, ${scene.motionStyle} camera, no text no logos, high quality`
+        const videoUrl = await generateVeoClip(veoPrompt, id, i, jid)
+          ?? await searchPexelsVideo(scene.visualKeywords)
+        const imageUrl = videoUrl ? null : await searchPexelsImage(scene.visualKeywords)
+        return {
+          videoUrl,
+          imageUrl,
+          startMs: timings[i].startMs,
+          durationMs: timings[i].durationMs,
+          motionStyle: scene.motionStyle,
+        }
       })
     )
-    const scenes: SceneData[] = sceneDefs.map((scene, i) => ({
-      videoUrl: veoUrls[i] ?? null,
-      imageUrl: null,
-      startMs: timings[i].startMs,
-      durationMs: timings[i].durationMs,
-      motionStyle: scene.motionStyle,
-    }))
-    const hit = veoUrls.filter(Boolean).length
-    log('INFO', `[5/7] ${hit}/${sceneDefs.length} Veo clips generated`, jid)
+    const veoHit = scenes.filter(s => s.videoUrl?.includes('supabase')).length
+    const pexelsHit = scenes.filter(s => s.videoUrl && !s.videoUrl.includes('supabase')).length
+    const imageHit = scenes.filter(s => s.imageUrl).length
+    log('INFO', `[5/7] ${veoHit} Veo, ${pexelsHit} Pexels video, ${imageHit} Pexels image, ${scenes.length - veoHit - pexelsHit - imageHit} none`, jid)
 
     // ── STEP 6: Bundle ─────────────────────────────────────────────────────
     log('INFO', '[6/7] Bundling Remotion composition...', jid)
